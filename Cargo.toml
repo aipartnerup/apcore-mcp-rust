@@ -1,0 +1,55 @@
+[package]
+name = "apcore-mcp"
+version = "0.10.0"
+edition = "2021"
+description = "MCP bridge for apcore — expose apcore modules as MCP tools"
+license = "Apache-2.0"
+readme = "README.md"
+authors = ["aipartnerup <tercel.yi@gmail.com>"]
+homepage = "https://aipartnerup.com"
+repository = "https://github.com/aipartnerup/apcore-mcp-rust"
+documentation = "https://apcore.aipartnerup.com/"
+keywords = ["ai", "llm", "mcp", "apcore", "tools"]
+categories = [
+    "api-bindings",
+    "asynchronous",
+    "web-programming",
+]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+apcore = { version = "0.13", path = "../apcore-rust" }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "0.8"
+thiserror = "2"
+async-trait = "0.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive", "env"] }
+jsonwebtoken = "9"
+axum = { version = "0.8", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors"] }
+hyper = { version = "1", features = ["full"] }
+regex = "1"
+strum = "0.26"
+strum_macros = "0.26"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+tokio-stream = "0.1"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tower = { version = "0.5", features = ["util"] }
+tempfile = "3"
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
+
+[[bin]]
+name = "apcore-mcp"
+path = "src/bin/apcore-mcp.rs"

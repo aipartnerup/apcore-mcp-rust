@@ -1,0 +1,81 @@
+{
+  "feature": "constants",
+  "created": "2026-03-15T09:14:04Z",
+  "updated": "2026-03-15T09:40:14Z",
+  "status": "completed",
+  "execution_order": [
+    "setup",
+    "error-codes",
+    "registry-events",
+    "patterns",
+    "integration"
+  ],
+  "progress": {
+    "total_tasks": 5,
+    "completed": 5,
+    "in_progress": 0,
+    "pending": 0
+  },
+  "tasks": [
+    {
+      "id": "setup",
+      "file": "tasks/setup.md",
+      "title": "Add strum dependency, clean stub, test scaffolding",
+      "status": "completed",
+      "started_at": "2026-03-15T09:35:19Z",
+      "completed_at": "2026-03-15T09:36:54Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "error-codes",
+      "file": "tasks/error-codes.md",
+      "title": "ErrorCode enum with 18 variants",
+      "status": "completed",
+      "started_at": "2026-03-15T09:36:54Z",
+      "completed_at": "2026-03-15T09:38:04Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "registry-events",
+      "file": "tasks/registry-events.md",
+      "title": "RegistryEvent enum",
+      "status": "completed",
+      "started_at": "2026-03-15T09:38:04Z",
+      "completed_at": "2026-03-15T09:39:10Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "patterns",
+      "file": "tasks/patterns.md",
+      "title": "MODULE_ID_PATTERN and validation",
+      "status": "completed",
+      "started_at": null,
+      "completed_at": "2026-03-15T09:39:10Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "integration",
+      "file": "tasks/integration.md",
+      "title": "Cross-cutting tests and clippy",
+      "status": "completed",
+      "started_at": "2026-03-15T09:39:10Z",
+      "completed_at": "2026-03-15T09:40:14Z",
+      "assignee": null,
+      "commits": []
+    }
+  ],
+  "metadata": {
+    "source_doc": "docs/features/constants.md",
+    "created_by": "code-forge:port",
+    "version": "1.0",
+    "ported_from": {
+      "reference_impl": "apcore-mcp-python",
+      "reference_lang": "python",
+      "target_lang": "rust"
+    }
+  }
+}

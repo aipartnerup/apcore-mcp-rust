@@ -1,0 +1,125 @@
+{
+  "feature": "server",
+  "created": "2026-03-15T09:20:14Z",
+  "updated": "2026-03-15T12:25:27Z",
+  "status": "completed",
+  "execution_order": [
+    "define-transport-kind-enum",
+    "implement-registry-listener",
+    "define-server-config",
+    "implement-mcp-server-struct",
+    "implement-server-lifecycle",
+    "add-registry-listener-tests",
+    "add-server-unit-tests",
+    "add-integration-tests",
+    "update-module-exports"
+  ],
+  "progress": {
+    "total_tasks": 9,
+    "completed": 9,
+    "in_progress": 0,
+    "pending": 0
+  },
+  "tasks": [
+    {
+      "id": "define-transport-kind-enum",
+      "file": "tasks/define-transport-kind-enum.md",
+      "title": "Define TransportKind enum",
+      "status": "completed",
+      "started_at": "2026-03-15T12:04:20Z",
+      "completed_at": "2026-03-15T12:17:41Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "implement-registry-listener",
+      "file": "tasks/implement-registry-listener.md",
+      "title": "Implement RegistryListener",
+      "status": "completed",
+      "started_at": "2026-03-15T12:04:20Z",
+      "completed_at": "2026-03-15T12:17:41Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "define-server-config",
+      "file": "tasks/define-server-config.md",
+      "title": "Define MCPServerConfig",
+      "status": "completed",
+      "started_at": "2026-03-15T12:04:20Z",
+      "completed_at": "2026-03-15T12:17:41Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "implement-mcp-server-struct",
+      "file": "tasks/implement-mcp-server-struct.md",
+      "title": "Implement MCPServer struct",
+      "status": "completed",
+      "started_at": "2026-03-15T12:17:41Z",
+      "completed_at": "2026-03-15T12:21:32Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "implement-server-lifecycle",
+      "file": "tasks/implement-server-lifecycle.md",
+      "title": "Implement start/wait/stop",
+      "status": "completed",
+      "started_at": "2026-03-15T12:17:41Z",
+      "completed_at": "2026-03-15T12:21:32Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "add-registry-listener-tests",
+      "file": "tasks/add-registry-listener-tests.md",
+      "title": "RegistryListener unit tests",
+      "status": "completed",
+      "started_at": "2026-03-15T12:21:32Z",
+      "completed_at": "2026-03-15T12:25:27Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "add-server-unit-tests",
+      "file": "tasks/add-server-unit-tests.md",
+      "title": "MCPServer unit tests",
+      "status": "completed",
+      "started_at": "2026-03-15T12:21:32Z",
+      "completed_at": "2026-03-15T12:25:27Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "add-integration-tests",
+      "file": "tasks/add-integration-tests.md",
+      "title": "End-to-end server tests",
+      "status": "completed",
+      "started_at": "2026-03-15T12:21:32Z",
+      "completed_at": "2026-03-15T12:25:27Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "update-module-exports",
+      "file": "tasks/update-module-exports.md",
+      "title": "Clean up mod.rs exports",
+      "status": "completed",
+      "started_at": "2026-03-15T12:21:32Z",
+      "completed_at": "2026-03-15T12:25:27Z",
+      "assignee": null,
+      "commits": []
+    }
+  ],
+  "metadata": {
+    "source_doc": "docs/features/server.md",
+    "created_by": "code-forge:port",
+    "version": "1.0",
+    "ported_from": {
+      "reference_impl": "apcore-mcp-python",
+      "reference_lang": "python",
+      "target_lang": "rust"
+    }
+  }
+}

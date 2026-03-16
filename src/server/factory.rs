@@ -1,0 +1,1124 @@
+//! MCPServerFactory — constructs and configures MCP server instances.
+//!
+//! Responsible for building tools from registry descriptors, registering
+//! handlers, and producing a ready-to-run MCPServer.
+
+#![allow(unused)]
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use serde_json::Value;
+
+use apcore::module::ModuleAnnotations;
+use apcore::registry::{ModuleDescriptor, Registry};
+
+use crate::adapters::annotations::{AnnotationMapper, McpAnnotations};
+use crate::adapters::schema::SchemaConverter;
+use crate::server::router::ExecutionRouter;
+use crate::server::server::{FactoryError, MCPServer, MCPServerConfig};
+use crate::server::types::{
+    CallToolResult, InitializationOptions, ReadResourceContents, Resource,
+    ResourcesCapability, ServerCapabilities, TextContent, Tool,
+    ToolAnnotations, ToolsCapability,
+};
+
+/// AI intent metadata keys extracted from module metadata and appended
+/// to tool descriptions for agent visibility.
+const AI_INTENT_KEYS: &[&str] = &[
+    "x-when-to-use",
+    "x-when-not-to-use",
+    "x-common-mistakes",
+    "x-workflow-hints",
+];
+
+/// Enrich a base description with AI intent metadata.
+///
+/// For each recognized intent key present in `metadata` with a non-empty value,
+/// a formatted line is appended. The label is derived by stripping the `x-` prefix,
+/// replacing hyphens with spaces, and title-casing each word.
+///
+/// Returns the original description unchanged if metadata is `None`, empty,
+/// or contains no recognized intent keys with non-empty values.
+pub fn enrich_description(base: &str, metadata: Option<&HashMap<String, String>>) -> String {
+    let metadata = match metadata {
+        Some(m) if !m.is_empty() => m,
+        _ => return base.to_string(),
+    };
+
+    let mut intent_parts: Vec<String> = Vec::new();
+    for &key in AI_INTENT_KEYS {
+        if let Some(val) = metadata.get(key) {
+            if !val.is_empty() {
+                let label = format_intent_label(key);
+                intent_parts.push(format!("{}: {}", label, val));
+            }
+        }
+    }
+
+    if intent_parts.is_empty() {
+        base.to_string()
+    } else {
+        format!("{}\n\n{}", base, intent_parts.join("\n"))
+    }
+}
+
+/// Convert an intent key like `x-when-to-use` to a label like `When To Use`.
+fn format_intent_label(key: &str) -> String {
+    key.strip_prefix("x-")
+        .unwrap_or(key)
+        .split('-')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(c) => {
+                    let upper: String = c.to_uppercase().collect();
+                    format!("{}{}", upper, chars.collect::<String>())
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Metadata flags derived from module annotations for inclusion in
+/// the MCP tool `_meta` object.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolMeta {
+    /// Whether the tool requires human approval before execution.
+    pub requires_approval: bool,
+    /// Whether the tool supports streaming responses.
+    pub streaming: bool,
+}
+
+/// Factory-level annotation helpers that extend [`AnnotationMapper`]
+/// with `_meta` generation for MCP tool definitions.
+pub struct ToolAnnotationBuilder;
+
+impl ToolAnnotationBuilder {
+    /// Convert module annotations into MCP tool annotations.
+    ///
+    /// Delegates to [`AnnotationMapper::to_mcp_annotations`].
+    pub fn build_annotations(annotations: Option<&ModuleAnnotations>) -> McpAnnotations {
+        AnnotationMapper::to_mcp_annotations(annotations)
+    }
+
+    /// Check whether the module's annotations indicate streaming support.
+    ///
+    /// Returns `false` when annotations are `None`.
+    pub fn is_streaming(annotations: Option<&ModuleAnnotations>) -> bool {
+        match annotations {
+            None => false,
+            Some(a) => a.streaming,
+        }
+    }
+
+    /// Build the `_meta` object for an MCP tool definition.
+    ///
+    /// Includes `requiresApproval` and `streaming` flags derived from
+    /// module annotations.
+    pub fn build_meta(annotations: Option<&ModuleAnnotations>) -> ToolMeta {
+        ToolMeta {
+            requires_approval: AnnotationMapper::has_requires_approval(annotations),
+            streaming: Self::is_streaming(annotations),
+        }
+    }
+
+    /// Serialize `_meta` to a JSON value suitable for embedding in
+    /// an MCP tool definition.
+    pub fn build_meta_value(annotations: Option<&ModuleAnnotations>) -> Value {
+        let meta = Self::build_meta(annotations);
+        let mut map = serde_json::Map::new();
+        if meta.requires_approval {
+            map.insert("requiresApproval".to_string(), Value::Bool(true));
+        }
+        if meta.streaming {
+            map.insert("streaming".to_string(), Value::Bool(true));
+        }
+        Value::Object(map)
+    }
+}
+
+/// Factory for constructing [`MCPServer`] instances from a registry and executor.
+pub struct MCPServerFactory {
+    schema_converter: SchemaConverter,
+    annotation_mapper: AnnotationMapper,
+}
+
+impl MCPServerFactory {
+    /// Create a new factory with default components.
+    pub fn new() -> Self {
+        Self {
+            schema_converter: SchemaConverter,
+            annotation_mapper: AnnotationMapper,
+        }
+    }
+
+    /// Create a new MCP server instance.
+    ///
+    /// # Arguments
+    /// * `name` - Server name advertised in MCP init.
+    /// * `version` - Server version string (used in init options, not stored on server).
+    pub fn create_server(&self, name: &str, version: &str) -> MCPServer {
+        MCPServer::new(MCPServerConfig {
+            name: name.to_string(),
+            ..Default::default()
+        })
+    }
+
+    /// Build a single MCP tool definition from a module descriptor.
+    ///
+    /// Mapping:
+    /// - `descriptor.name` -> `Tool.name` (dot-notation module_id, NOT normalized)
+    /// - `description` + AI intent metadata -> `Tool.description`
+    /// - `SchemaConverter::convert_input_schema` -> `Tool.inputSchema`
+    /// - `AnnotationMapper::to_mcp_annotations` -> `Tool.annotations`
+    /// - `requires_approval` / `streaming` flags -> `Tool._meta`
+    pub fn build_tool(
+        &self,
+        descriptor: &ModuleDescriptor,
+        description: &str,
+        metadata: Option<&HashMap<String, String>>,
+    ) -> Result<Tool, Box<dyn std::error::Error>> {
+        // Convert input schema
+        let input_schema = SchemaConverter::convert_input_schema(&descriptor.input_schema)?;
+
+        // Map annotations
+        let mcp_ann = AnnotationMapper::to_mcp_annotations(Some(&descriptor.annotations));
+        let annotations = Some(ToolAnnotations {
+            title: mcp_ann.title,
+            read_only_hint: Some(mcp_ann.read_only_hint),
+            destructive_hint: Some(mcp_ann.destructive_hint),
+            idempotent_hint: Some(mcp_ann.idempotent_hint),
+            open_world_hint: Some(mcp_ann.open_world_hint),
+        });
+
+        // Build _meta
+        let meta_value = ToolAnnotationBuilder::build_meta_value(Some(&descriptor.annotations));
+        let meta = if meta_value.as_object().map_or(true, |m| m.is_empty()) {
+            None
+        } else {
+            Some(meta_value)
+        };
+
+        // Enrich description with AI intent metadata
+        let enriched_description = enrich_description(description, metadata);
+
+        Ok(Tool {
+            name: descriptor.name.clone(),
+            description: enriched_description,
+            input_schema,
+            annotations,
+            meta,
+        })
+    }
+
+    // ---- Task: build_tools ----
+
+    /// Build MCP tool definitions for all modules in the registry.
+    ///
+    /// Delegates filtering to `Registry::list(tags, prefix)`, then builds
+    /// a tool for each module that has a definition. Modules without
+    /// definitions or that fail `build_tool()` are logged and skipped.
+    pub fn build_tools(
+        &self,
+        registry: &Registry,
+        tags: Option<&[&str]>,
+        prefix: Option<&str>,
+    ) -> Vec<Tool> {
+        let module_ids = registry.list(tags, prefix);
+        let mut tools = Vec::new();
+
+        for module_id in module_ids {
+            let descriptor = match registry.get_definition(module_id) {
+                Some(d) => d,
+                None => {
+                    tracing::warn!("Skipped module {}: no definition found", module_id);
+                    continue;
+                }
+            };
+
+            let description = registry.describe(module_id);
+
+            match self.build_tool(descriptor, &description, None) {
+                Ok(tool) => tools.push(tool),
+                Err(e) => {
+                    tracing::warn!("Failed to build tool for {}: {}", module_id, e);
+                    continue;
+                }
+            }
+        }
+
+        tools
+    }
+
+    // ---- Task: register_handlers ----
+
+    /// Register `list_tools` and `call_tool` handlers on the server.
+    ///
+    /// The `list_tools` handler returns a clone of the provided tools list.
+    /// The `call_tool` handler delegates to the router's `handle_call` method,
+    /// extracting progress token and identity from the extra context.
+    ///
+    /// Since there is no Rust MCP SDK yet, handlers are stored as closures
+    /// on the `MCPServer` struct. The transport layer will invoke these
+    /// when processing MCP protocol messages.
+    pub fn register_handlers(
+        &self,
+        server: &mut MCPServer,
+        tools: Vec<Tool>,
+        router: Arc<ExecutionRouter>,
+    ) {
+        let tools = Arc::new(tools);
+
+        // list_tools handler: returns a clone of the tools list
+        let tools_clone = Arc::clone(&tools);
+        server.list_tools_handler = Some(Arc::new(move || {
+            tools_clone.as_ref().clone()
+        }));
+
+        // call_tool handler: delegates to the execution router
+        let router_clone = Arc::clone(&router);
+        server.call_tool_handler = Some(Arc::new(move |name, arguments, extra| {
+            let router = Arc::clone(&router_clone);
+            Box::pin(async move {
+                let extra_ref = extra.as_ref();
+                let (content_items, is_error, _trace_id) =
+                    router.handle_call(&name, &arguments, extra_ref).await;
+
+                let content: Vec<TextContent> = content_items
+                    .into_iter()
+                    .filter(|item| item.content_type == "text")
+                    .map(|item| {
+                        TextContent::new(
+                            item.data
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string(),
+                        )
+                    })
+                    .collect();
+
+                CallToolResult { content, is_error }
+            })
+        }));
+    }
+
+    // ---- Task: register_resources ----
+
+    /// Register `list_resources` and `read_resource` handlers for modules
+    /// with documentation.
+    ///
+    /// Iterates over the registry, collects modules that have descriptions
+    /// (used as documentation since `ModuleDescriptor` lacks a dedicated
+    /// `documentation` field), and registers handlers that expose them as
+    /// `docs://{module_id}` resources.
+    ///
+    /// Since there is no Rust MCP SDK yet, handlers are stored as closures
+    /// on the `MCPServer` struct.
+    pub fn register_resource_handlers(
+        &self,
+        server: &mut MCPServer,
+        registry: &Registry,
+    ) {
+        // Build docs map: module_id -> description (as documentation)
+        let mut docs_map: HashMap<String, String> = HashMap::new();
+        for module_id in registry.list(None, None) {
+            let description = registry.describe(module_id);
+            if description != "Module not found" && !description.is_empty() {
+                docs_map.insert(module_id.to_string(), description);
+            }
+        }
+
+        let docs = Arc::new(docs_map);
+
+        // list_resources handler
+        let docs_for_list = Arc::clone(&docs);
+        server.list_resources_handler = Some(Arc::new(move || {
+            docs_for_list
+                .iter()
+                .map(|(module_id, _)| Resource {
+                    uri: format!("docs://{}", module_id),
+                    name: format!("{} documentation", module_id),
+                    mime_type: "text/plain".to_string(),
+                })
+                .collect()
+        }));
+
+        // read_resource handler
+        let docs_for_read = Arc::clone(&docs);
+        server.read_resource_handler = Some(Arc::new(move |uri: String| {
+            let prefix = "docs://";
+            if !uri.starts_with(prefix) {
+                return Err(FactoryError::UnsupportedScheme(uri));
+            }
+            let module_id = &uri[prefix.len()..];
+            match docs_for_read.get(module_id) {
+                Some(doc) => Ok(vec![ReadResourceContents {
+                    content: doc.clone(),
+                    mime_type: "text/plain".to_string(),
+                }]),
+                None => Err(FactoryError::ResourceNotFound(uri)),
+            }
+        }));
+    }
+
+    // ---- Task: init_options ----
+
+    /// Build the MCP initialization options.
+    ///
+    /// Constructs `InitializationOptions` with server name, version, and
+    /// capabilities derived from the registered handlers on the server.
+    pub fn build_init_options(
+        &self,
+        server: &MCPServer,
+        name: &str,
+        version: &str,
+    ) -> InitializationOptions {
+        let tools_cap = if server.has_tool_handlers() {
+            Some(ToolsCapability { list_changed: true })
+        } else {
+            None
+        };
+
+        let resources_cap = if server.has_resource_handlers() {
+            Some(ResourcesCapability { list_changed: true })
+        } else {
+            None
+        };
+
+        InitializationOptions {
+            server_name: name.to_string(),
+            server_version: version.to_string(),
+            capabilities: ServerCapabilities {
+                tools: tools_cap,
+                resources: resources_cap,
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Helper to create a minimal ModuleDescriptor for testing.
+    fn make_descriptor(name: &str, annotations: ModuleAnnotations) -> ModuleDescriptor {
+        ModuleDescriptor {
+            name: name.to_string(),
+            annotations,
+            input_schema: json!({"type": "object", "properties": {"query": {"type": "string"}}}),
+            output_schema: json!({}),
+            enabled: true,
+            tags: vec![],
+            dependencies: vec![],
+        }
+    }
+
+    fn make_descriptor_with_tags(
+        name: &str,
+        tags: Vec<String>,
+    ) -> ModuleDescriptor {
+        ModuleDescriptor {
+            name: name.to_string(),
+            annotations: ModuleAnnotations::default(),
+            input_schema: json!({"type": "object", "properties": {"q": {"type": "string"}}}),
+            output_schema: json!({}),
+            enabled: true,
+            tags,
+            dependencies: vec![],
+        }
+    }
+
+    /// Helper to create an MCPServerFactory for tests.
+    fn make_factory() -> MCPServerFactory {
+        MCPServerFactory::new()
+    }
+
+    /// Helper to create a mock module for registry tests.
+    struct MockModule {
+        desc: String,
+    }
+
+    impl MockModule {
+        fn new(desc: &str) -> Self {
+            Self {
+                desc: desc.to_string(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl apcore::module::Module for MockModule {
+        fn input_schema(&self) -> serde_json::Value {
+            json!({"type": "object", "properties": {"q": {"type": "string"}}})
+        }
+        fn output_schema(&self) -> serde_json::Value {
+            json!({})
+        }
+        fn description(&self) -> &str {
+            &self.desc
+        }
+        async fn execute(
+            &self,
+            _inputs: serde_json::Value,
+            _ctx: &apcore::context::Context<serde_json::Value>,
+        ) -> Result<serde_json::Value, apcore::errors::ModuleError> {
+            Ok(json!({}))
+        }
+    }
+
+    /// Helper to create a registry with mock modules.
+    fn make_registry_with_modules(
+        modules: Vec<(&str, &str, Vec<String>)>,
+    ) -> Registry {
+        let mut registry = Registry::new();
+        for (name, desc, tags) in modules {
+            let module = Box::new(MockModule::new(desc));
+            let descriptor = ModuleDescriptor {
+                name: name.to_string(),
+                annotations: ModuleAnnotations::default(),
+                input_schema: json!({"type": "object", "properties": {"q": {"type": "string"}}}),
+                output_schema: json!({}),
+                enabled: true,
+                tags,
+                dependencies: vec![],
+            };
+            registry
+                .register_internal(name, module, descriptor)
+                .unwrap();
+        }
+        registry
+    }
+
+    // ---- build_tool tests ----
+
+    #[test]
+    fn test_build_tool_name_is_module_name() {
+        let factory = make_factory();
+        let desc = make_descriptor("my.module.id", ModuleAnnotations::default());
+        let tool = factory.build_tool(&desc, "A tool", None).unwrap();
+        assert_eq!(tool.name, "my.module.id");
+    }
+
+    #[test]
+    fn test_build_tool_description() {
+        let factory = make_factory();
+        let desc = make_descriptor("mod.test", ModuleAnnotations::default());
+        let tool = factory.build_tool(&desc, "Reads files from disk", None).unwrap();
+        assert_eq!(tool.description, "Reads files from disk");
+    }
+
+    #[test]
+    fn test_build_tool_input_schema() {
+        let factory = make_factory();
+        let desc = make_descriptor("mod.test", ModuleAnnotations::default());
+        let tool = factory.build_tool(&desc, "desc", None).unwrap();
+        assert_eq!(tool.input_schema["type"], "object");
+        assert_eq!(tool.input_schema["properties"]["query"]["type"], "string");
+    }
+
+    #[test]
+    fn test_build_tool_annotations_mapped() {
+        let factory = make_factory();
+        let mut ann = ModuleAnnotations::default();
+        ann.readonly = true;
+        ann.destructive = true;
+        let desc = make_descriptor("mod.test", ann);
+        let tool = factory.build_tool(&desc, "desc", None).unwrap();
+        let annotations = tool.annotations.unwrap();
+        assert_eq!(annotations.read_only_hint, Some(true));
+        assert_eq!(annotations.destructive_hint, Some(true));
+    }
+
+    #[test]
+    fn test_build_tool_meta_requires_approval() {
+        let factory = make_factory();
+        let mut ann = ModuleAnnotations::default();
+        ann.requires_approval = true;
+        let desc = make_descriptor("mod.test", ann);
+        let tool = factory.build_tool(&desc, "desc", None).unwrap();
+        let meta = tool.meta.unwrap();
+        assert_eq!(meta["requiresApproval"], true);
+        assert!(meta.get("streaming").is_none());
+    }
+
+    #[test]
+    fn test_build_tool_meta_streaming() {
+        let factory = make_factory();
+        let mut ann = ModuleAnnotations::default();
+        ann.streaming = true;
+        let desc = make_descriptor("mod.test", ann);
+        let tool = factory.build_tool(&desc, "desc", None).unwrap();
+        let meta = tool.meta.unwrap();
+        assert_eq!(meta["streaming"], true);
+        assert!(meta.get("requiresApproval").is_none());
+    }
+
+    #[test]
+    fn test_build_tool_meta_both() {
+        let factory = make_factory();
+        let mut ann = ModuleAnnotations::default();
+        ann.requires_approval = true;
+        ann.streaming = true;
+        let desc = make_descriptor("mod.test", ann);
+        let tool = factory.build_tool(&desc, "desc", None).unwrap();
+        let meta = tool.meta.unwrap();
+        assert_eq!(meta["requiresApproval"], true);
+        assert_eq!(meta["streaming"], true);
+    }
+
+    #[test]
+    fn test_build_tool_meta_none() {
+        let factory = make_factory();
+        let desc = make_descriptor("mod.test", ModuleAnnotations::default());
+        let tool = factory.build_tool(&desc, "desc", None).unwrap();
+        assert!(tool.meta.is_none(), "default annotations should produce no _meta");
+    }
+
+    // ---- AI intent / enrich_description tests ----
+
+    #[test]
+    fn test_no_metadata_no_suffix() {
+        let result = enrich_description("Base description", None);
+        assert_eq!(result, "Base description");
+    }
+
+    #[test]
+    fn test_empty_metadata_no_suffix() {
+        let metadata = HashMap::new();
+        let result = enrich_description("Base description", Some(&metadata));
+        assert_eq!(result, "Base description");
+    }
+
+    #[test]
+    fn test_when_to_use_appended() {
+        let mut metadata = HashMap::new();
+        metadata.insert("x-when-to-use".to_string(), "Use for reading files".to_string());
+        let result = enrich_description("Base description", Some(&metadata));
+        assert_eq!(result, "Base description\n\nWhen To Use: Use for reading files");
+    }
+
+    #[test]
+    fn test_multiple_intents_appended() {
+        let mut metadata = HashMap::new();
+        metadata.insert("x-when-to-use".to_string(), "Use for reads".to_string());
+        metadata.insert("x-common-mistakes".to_string(), "Forgetting the path".to_string());
+        let result = enrich_description("Base", Some(&metadata));
+        assert!(result.contains("When To Use: Use for reads"));
+        assert!(result.contains("Common Mistakes: Forgetting the path"));
+        // Verify they are separated by newline (within the suffix block)
+        let suffix = result.strip_prefix("Base\n\n").unwrap();
+        assert!(suffix.contains('\n'));
+    }
+
+    #[test]
+    fn test_intent_key_label_formatting() {
+        assert_eq!(format_intent_label("x-when-to-use"), "When To Use");
+        assert_eq!(format_intent_label("x-when-not-to-use"), "When Not To Use");
+        assert_eq!(format_intent_label("x-common-mistakes"), "Common Mistakes");
+        assert_eq!(format_intent_label("x-workflow-hints"), "Workflow Hints");
+    }
+
+    #[test]
+    fn test_empty_intent_value_skipped() {
+        let mut metadata = HashMap::new();
+        metadata.insert("x-when-to-use".to_string(), "".to_string());
+        metadata.insert("x-common-mistakes".to_string(), "Don't forget".to_string());
+        let result = enrich_description("Base", Some(&metadata));
+        assert!(!result.contains("When To Use"));
+        assert!(result.contains("Common Mistakes: Don't forget"));
+    }
+
+    #[test]
+    fn test_non_intent_metadata_ignored() {
+        let mut metadata = HashMap::new();
+        metadata.insert("x-custom-field".to_string(), "some value".to_string());
+        metadata.insert("random-key".to_string(), "other value".to_string());
+        let result = enrich_description("Base", Some(&metadata));
+        assert_eq!(result, "Base");
+    }
+
+    #[test]
+    fn test_build_tool_with_ai_intent_metadata() {
+        let factory = make_factory();
+        let desc = make_descriptor("files.read", ModuleAnnotations::default());
+        let mut metadata = HashMap::new();
+        metadata.insert("x-when-to-use".to_string(), "Use for reading files".to_string());
+        metadata.insert("x-common-mistakes".to_string(), "Forgetting the path".to_string());
+        let tool = factory.build_tool(&desc, "Read files", Some(&metadata)).unwrap();
+        assert!(tool.description.starts_with("Read files\n\n"));
+        assert!(tool.description.contains("When To Use: Use for reading files"));
+        assert!(tool.description.contains("Common Mistakes: Forgetting the path"));
+    }
+
+    #[test]
+    fn test_intent_order_follows_constant() {
+        let mut metadata = HashMap::new();
+        metadata.insert("x-workflow-hints".to_string(), "hint".to_string());
+        metadata.insert("x-when-to-use".to_string(), "use".to_string());
+        metadata.insert("x-common-mistakes".to_string(), "mistake".to_string());
+        metadata.insert("x-when-not-to-use".to_string(), "not use".to_string());
+        let result = enrich_description("Base", Some(&metadata));
+        let suffix = result.strip_prefix("Base\n\n").unwrap();
+        let lines: Vec<&str> = suffix.lines().collect();
+        assert_eq!(lines.len(), 4);
+        assert!(lines[0].starts_with("When To Use:"));
+        assert!(lines[1].starts_with("When Not To Use:"));
+        assert!(lines[2].starts_with("Common Mistakes:"));
+        assert!(lines[3].starts_with("Workflow Hints:"));
+    }
+
+    // ---- Annotation mapping tests (via ToolAnnotationBuilder) ----
+
+    #[test]
+    fn test_readonly_maps_to_read_only_hint() {
+        let mut ann = ModuleAnnotations::default();
+        ann.readonly = true;
+        let result = ToolAnnotationBuilder::build_annotations(Some(&ann));
+        assert_eq!(result.read_only_hint, true);
+    }
+
+    #[test]
+    fn test_destructive_maps_to_destructive_hint() {
+        let mut ann = ModuleAnnotations::default();
+        ann.destructive = true;
+        let result = ToolAnnotationBuilder::build_annotations(Some(&ann));
+        assert_eq!(result.destructive_hint, true);
+    }
+
+    #[test]
+    fn test_idempotent_maps_to_idempotent_hint() {
+        let mut ann = ModuleAnnotations::default();
+        ann.idempotent = true;
+        let result = ToolAnnotationBuilder::build_annotations(Some(&ann));
+        assert_eq!(result.idempotent_hint, true);
+    }
+
+    #[test]
+    fn test_open_world_maps_to_open_world_hint() {
+        let mut ann = ModuleAnnotations::default();
+        ann.open_world = false;
+        let result = ToolAnnotationBuilder::build_annotations(Some(&ann));
+        assert_eq!(result.open_world_hint, false);
+    }
+
+    #[test]
+    fn test_default_annotations_mapping() {
+        let ann = ModuleAnnotations::default();
+        let result = ToolAnnotationBuilder::build_annotations(Some(&ann));
+        assert_eq!(result.read_only_hint, false);
+        assert_eq!(result.destructive_hint, false);
+        assert_eq!(result.idempotent_hint, false);
+        assert_eq!(result.open_world_hint, true);
+    }
+
+    #[test]
+    fn test_has_requires_approval_true() {
+        let mut ann = ModuleAnnotations::default();
+        ann.requires_approval = true;
+        let meta = ToolAnnotationBuilder::build_meta(Some(&ann));
+        assert!(meta.requires_approval);
+    }
+
+    #[test]
+    fn test_has_requires_approval_false() {
+        let ann = ModuleAnnotations::default();
+        let meta = ToolAnnotationBuilder::build_meta(Some(&ann));
+        assert!(!meta.requires_approval);
+    }
+
+    #[test]
+    fn test_streaming_flag() {
+        let mut ann = ModuleAnnotations::default();
+        ann.streaming = true;
+        assert!(ToolAnnotationBuilder::is_streaming(Some(&ann)));
+        let meta = ToolAnnotationBuilder::build_meta(Some(&ann));
+        assert!(meta.streaming);
+    }
+
+    #[test]
+    fn test_streaming_flag_false_by_default() {
+        let ann = ModuleAnnotations::default();
+        assert!(!ToolAnnotationBuilder::is_streaming(Some(&ann)));
+    }
+
+    #[test]
+    fn test_streaming_flag_none() {
+        assert!(!ToolAnnotationBuilder::is_streaming(None));
+    }
+
+    // ---- _meta JSON tests ----
+
+    #[test]
+    fn test_build_meta_value_empty_for_defaults() {
+        let ann = ModuleAnnotations::default();
+        let meta = ToolAnnotationBuilder::build_meta_value(Some(&ann));
+        let obj = meta.as_object().unwrap();
+        assert!(obj.is_empty(), "default annotations should produce empty _meta");
+    }
+
+    #[test]
+    fn test_build_meta_value_with_approval_and_streaming() {
+        let mut ann = ModuleAnnotations::default();
+        ann.requires_approval = true;
+        ann.streaming = true;
+        let meta = ToolAnnotationBuilder::build_meta_value(Some(&ann));
+        let obj = meta.as_object().unwrap();
+        assert_eq!(obj.get("requiresApproval"), Some(&Value::Bool(true)));
+        assert_eq!(obj.get("streaming"), Some(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_build_meta_value_none_annotations() {
+        let meta = ToolAnnotationBuilder::build_meta_value(None);
+        let obj = meta.as_object().unwrap();
+        assert!(obj.is_empty());
+    }
+
+    // ---- build_tools tests ----
+
+    #[test]
+    fn test_build_tools_all_modules() {
+        let factory = make_factory();
+        let registry = make_registry_with_modules(vec![
+            ("mod.a", "Module A", vec![]),
+            ("mod.b", "Module B", vec![]),
+            ("mod.c", "Module C", vec![]),
+        ]);
+
+        let tools = factory.build_tools(&registry, None, None);
+        assert_eq!(tools.len(), 3);
+    }
+
+    #[test]
+    fn test_build_tools_tag_filter() {
+        let factory = make_factory();
+        let registry = make_registry_with_modules(vec![
+            ("mod.a", "Module A", vec!["search".to_string()]),
+            ("mod.b", "Module B", vec!["io".to_string()]),
+            ("mod.c", "Module C", vec!["search".to_string(), "io".to_string()]),
+        ]);
+
+        let tools = factory.build_tools(&registry, Some(&["search"]), None);
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"mod.a"));
+        assert!(names.contains(&"mod.c"));
+        assert!(!names.contains(&"mod.b"));
+    }
+
+    #[test]
+    fn test_build_tools_prefix_filter() {
+        let factory = make_factory();
+        let registry = make_registry_with_modules(vec![
+            ("files.read", "Read files", vec![]),
+            ("files.write", "Write files", vec![]),
+            ("search.query", "Search query", vec![]),
+        ]);
+
+        let tools = factory.build_tools(&registry, None, Some("files."));
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"files.read"));
+        assert!(names.contains(&"files.write"));
+        assert!(!names.contains(&"search.query"));
+    }
+
+    #[test]
+    fn test_build_tools_empty_registry() {
+        let factory = make_factory();
+        let registry = Registry::new();
+        let tools = factory.build_tools(&registry, None, None);
+        assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn test_build_tools_combined_filters() {
+        let factory = make_factory();
+        let registry = make_registry_with_modules(vec![
+            ("files.read", "Read files", vec!["io".to_string()]),
+            ("files.write", "Write files", vec!["io".to_string(), "mutation".to_string()]),
+            ("search.query", "Search", vec!["io".to_string()]),
+        ]);
+
+        let tools = factory.build_tools(&registry, Some(&["io"]), Some("files."));
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"files.read"));
+        assert!(names.contains(&"files.write"));
+        assert!(!names.contains(&"search.query"));
+    }
+
+    #[test]
+    fn test_build_tools_descriptions_from_registry() {
+        let factory = make_factory();
+        let registry = make_registry_with_modules(vec![
+            ("mod.a", "Custom description for A", vec![]),
+        ]);
+
+        let tools = factory.build_tools(&registry, None, None);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].description, "Custom description for A");
+    }
+
+    // ---- register_handlers tests ----
+
+    #[test]
+    fn test_list_tools_returns_all_tools() {
+        let factory = make_factory();
+        let mut server = factory.create_server("test", "1.0.0");
+        let tools = vec![
+            Tool {
+                name: "tool.a".to_string(),
+                description: "A".to_string(),
+                input_schema: json!({}),
+                annotations: None,
+                meta: None,
+            },
+            Tool {
+                name: "tool.b".to_string(),
+                description: "B".to_string(),
+                input_schema: json!({}),
+                annotations: None,
+                meta: None,
+            },
+        ];
+
+        let router = Arc::new(ExecutionRouter::stub());
+        factory.register_handlers(&mut server, tools.clone(), router);
+
+        let listed = server.list_tools().unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].name, "tool.a");
+        assert_eq!(listed[1].name, "tool.b");
+    }
+
+    #[test]
+    fn test_handlers_registered_flag() {
+        let factory = make_factory();
+        let mut server = factory.create_server("test", "1.0.0");
+        assert!(!server.has_tool_handlers());
+
+        let router = Arc::new(ExecutionRouter::stub());
+        factory.register_handlers(&mut server, vec![], router);
+        assert!(server.has_tool_handlers());
+    }
+
+    // ---- register_resource_handlers tests ----
+
+    #[test]
+    fn test_list_resources_returns_documented_modules() {
+        let factory = make_factory();
+        let mut server = factory.create_server("test", "1.0.0");
+        let registry = make_registry_with_modules(vec![
+            ("mod.a", "Module A docs", vec![]),
+            ("mod.b", "Module B docs", vec![]),
+        ]);
+
+        factory.register_resource_handlers(&mut server, &registry);
+
+        let resources = server.list_resources().unwrap();
+        assert_eq!(resources.len(), 2);
+        for r in &resources {
+            assert!(r.uri.starts_with("docs://"));
+            assert!(r.name.ends_with(" documentation"));
+            assert_eq!(r.mime_type, "text/plain");
+        }
+    }
+
+    #[test]
+    fn test_read_resource_returns_documentation() {
+        let factory = make_factory();
+        let mut server = factory.create_server("test", "1.0.0");
+        let registry = make_registry_with_modules(vec![
+            ("mod.a", "Module A documentation text", vec![]),
+        ]);
+
+        factory.register_resource_handlers(&mut server, &registry);
+
+        let result = server.read_resource("docs://mod.a".to_string()).unwrap();
+        let contents = result.unwrap();
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0].content, "Module A documentation text");
+        assert_eq!(contents[0].mime_type, "text/plain");
+    }
+
+    #[test]
+    fn test_read_resource_unknown_uri_errors() {
+        let factory = make_factory();
+        let mut server = factory.create_server("test", "1.0.0");
+        let registry = make_registry_with_modules(vec![
+            ("mod.a", "Module A docs", vec![]),
+        ]);
+
+        factory.register_resource_handlers(&mut server, &registry);
+
+        let result = server.read_resource("docs://nonexistent".to_string()).unwrap();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_read_resource_wrong_scheme_errors() {
+        let factory = make_factory();
+        let mut server = factory.create_server("test", "1.0.0");
+        let registry = make_registry_with_modules(vec![
+            ("mod.a", "Module A docs", vec![]),
+        ]);
+
+        factory.register_resource_handlers(&mut server, &registry);
+
+        let result = server.read_resource("http://mod.a".to_string()).unwrap();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resource_handlers_registered_flag() {
+        let factory = make_factory();
+        let mut server = factory.create_server("test", "1.0.0");
+        assert!(!server.has_resource_handlers());
+
+        let registry = make_registry_with_modules(vec![
+            ("mod.a", "Module A docs", vec![]),
+        ]);
+        factory.register_resource_handlers(&mut server, &registry);
+        assert!(server.has_resource_handlers());
+    }
+
+    // ---- init_options tests ----
+
+    #[test]
+    fn test_init_options_has_server_name() {
+        let factory = make_factory();
+        let server = factory.create_server("my-server", "2.0.0");
+        let opts = factory.build_init_options(&server, "my-server", "2.0.0");
+        assert_eq!(opts.server_name, "my-server");
+    }
+
+    #[test]
+    fn test_init_options_has_server_version() {
+        let factory = make_factory();
+        let server = factory.create_server("test", "1.2.3");
+        let opts = factory.build_init_options(&server, "test", "1.2.3");
+        assert_eq!(opts.server_version, "1.2.3");
+    }
+
+    #[test]
+    fn test_init_options_no_capabilities_when_no_handlers() {
+        let factory = make_factory();
+        let server = factory.create_server("test", "1.0.0");
+        let opts = factory.build_init_options(&server, "test", "1.0.0");
+        assert!(opts.capabilities.tools.is_none());
+        assert!(opts.capabilities.resources.is_none());
+    }
+
+    #[test]
+    fn test_init_options_tools_capability_when_handlers_registered() {
+        let factory = make_factory();
+        let mut server = factory.create_server("test", "1.0.0");
+        let router = Arc::new(ExecutionRouter::stub());
+        factory.register_handlers(&mut server, vec![], router);
+
+        let opts = factory.build_init_options(&server, "test", "1.0.0");
+        assert!(opts.capabilities.tools.is_some());
+        assert!(opts.capabilities.tools.unwrap().list_changed);
+    }
+
+    #[test]
+    fn test_init_options_resources_capability_when_handlers_registered() {
+        let factory = make_factory();
+        let mut server = factory.create_server("test", "1.0.0");
+        let registry = make_registry_with_modules(vec![
+            ("mod.a", "Module A docs", vec![]),
+        ]);
+        factory.register_resource_handlers(&mut server, &registry);
+
+        let opts = factory.build_init_options(&server, "test", "1.0.0");
+        assert!(opts.capabilities.resources.is_some());
+        assert!(opts.capabilities.resources.unwrap().list_changed);
+    }
+
+    #[test]
+    fn test_init_options_default_values() {
+        let factory = make_factory();
+        let server = factory.create_server("apcore-mcp", "0.1.0");
+        let opts = factory.build_init_options(&server, "apcore-mcp", "0.1.0");
+        assert_eq!(opts.server_name, "apcore-mcp");
+        assert_eq!(opts.server_version, "0.1.0");
+    }
+
+    // ---- factory integration tests ----
+
+    #[test]
+    fn test_factory_new_initializes_components() {
+        let factory = MCPServerFactory::new();
+        // If new() doesn't panic, components are initialized.
+        // We verify by using the factory to create a server.
+        let server = factory.create_server("test", "1.0.0");
+        assert_eq!(server.name(), "test");
+    }
+
+    #[test]
+    fn test_create_server_returns_server() {
+        let factory = make_factory();
+        let server = factory.create_server("integration-test", "0.5.0");
+        assert_eq!(server.name(), "integration-test");
+    }
+
+    #[test]
+    fn test_full_lifecycle() {
+        let factory = make_factory();
+        let mut server = factory.create_server("lifecycle-test", "1.0.0");
+
+        // Build tools from registry
+        let registry = make_registry_with_modules(vec![
+            ("mod.alpha", "Alpha module with docs", vec!["core".to_string()]),
+            ("mod.beta", "Beta module", vec!["io".to_string()]),
+        ]);
+
+        let tools = factory.build_tools(&registry, None, None);
+        assert_eq!(tools.len(), 2);
+
+        // Register tool handlers
+        let router = Arc::new(ExecutionRouter::stub());
+        factory.register_handlers(&mut server, tools, router);
+        assert!(server.has_tool_handlers());
+
+        // Register resource handlers
+        factory.register_resource_handlers(&mut server, &registry);
+        assert!(server.has_resource_handlers());
+
+        // Build init options — should reflect both capabilities
+        let opts = factory.build_init_options(&server, "lifecycle-test", "1.0.0");
+        assert_eq!(opts.server_name, "lifecycle-test");
+        assert_eq!(opts.server_version, "1.0.0");
+        assert!(opts.capabilities.tools.is_some());
+        assert!(opts.capabilities.resources.is_some());
+
+        // Verify list_tools returns what we built
+        let listed_tools = server.list_tools().unwrap();
+        assert_eq!(listed_tools.len(), 2);
+
+        // Verify list_resources returns documented modules
+        let resources = server.list_resources().unwrap();
+        assert_eq!(resources.len(), 2);
+    }
+
+    #[test]
+    fn test_end_to_end_resource_read() {
+        let factory = make_factory();
+        let mut server = factory.create_server("test", "1.0.0");
+        let registry = make_registry_with_modules(vec![
+            ("doc.module", "This is the documentation for doc.module", vec![]),
+        ]);
+
+        factory.register_resource_handlers(&mut server, &registry);
+
+        // Read the resource
+        let result = server
+            .read_resource("docs://doc.module".to_string())
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].content, "This is the documentation for doc.module");
+    }
+}

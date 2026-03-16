@@ -1,0 +1,92 @@
+{
+  "feature": "explorer",
+  "created": "2026-03-15T09:25:53Z",
+  "updated": "2026-03-15T12:51:59Z",
+  "status": "completed",
+  "execution_order": [
+    "define-explorer-types",
+    "implement-html-template",
+    "implement-api-handlers",
+    "implement-explorer-mount",
+    "add-explorer-tests",
+    "update-module-exports"
+  ],
+  "progress": {
+    "total_tasks": 6,
+    "completed": 6,
+    "in_progress": 0,
+    "pending": 0
+  },
+  "tasks": [
+    {
+      "id": "define-explorer-types",
+      "file": "tasks/define-explorer-types.md",
+      "title": "Define ExplorerConfig and types",
+      "status": "completed",
+      "started_at": "2026-03-15T12:42:40Z",
+      "completed_at": "2026-03-15T12:44:52Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "implement-html-template",
+      "file": "tasks/implement-html-template.md",
+      "title": "Embedded HTML/JS explorer page",
+      "status": "completed",
+      "started_at": "2026-03-15T12:42:40Z",
+      "completed_at": "2026-03-15T12:44:52Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "implement-api-handlers",
+      "file": "tasks/implement-api-handlers.md",
+      "title": "API handlers for tools",
+      "status": "completed",
+      "started_at": "2026-03-15T12:44:52Z",
+      "completed_at": "2026-03-15T12:51:59Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "implement-explorer-mount",
+      "file": "tasks/implement-explorer-mount.md",
+      "title": "Wire create_explorer_mount",
+      "status": "completed",
+      "started_at": "2026-03-15T12:44:52Z",
+      "completed_at": "2026-03-15T12:51:59Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "add-explorer-tests",
+      "file": "tasks/add-explorer-tests.md",
+      "title": "Explorer tests",
+      "status": "completed",
+      "started_at": "2026-03-15T12:44:52Z",
+      "completed_at": "2026-03-15T12:51:59Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "update-module-exports",
+      "file": "tasks/update-module-exports.md",
+      "title": "Clean up exports",
+      "status": "completed",
+      "started_at": "2026-03-15T12:44:52Z",
+      "completed_at": "2026-03-15T12:51:59Z",
+      "assignee": null,
+      "commits": []
+    }
+  ],
+  "metadata": {
+    "source_doc": "docs/features/explorer.md",
+    "created_by": "code-forge:port",
+    "version": "1.0",
+    "ported_from": {
+      "reference_impl": "apcore-mcp-python",
+      "reference_lang": "python",
+      "target_lang": "rust"
+    }
+  }
+}

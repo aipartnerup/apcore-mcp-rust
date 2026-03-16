@@ -1,0 +1,81 @@
+{
+  "feature": "converters",
+  "created": "2026-03-15T09:25:53Z",
+  "updated": "2026-03-15T10:20:34Z",
+  "status": "completed",
+  "execution_order": [
+    "converter-types",
+    "strict-mode",
+    "convert-descriptor",
+    "convert-registry",
+    "integration-tests"
+  ],
+  "progress": {
+    "total_tasks": 5,
+    "completed": 5,
+    "in_progress": 0,
+    "pending": 0
+  },
+  "tasks": [
+    {
+      "id": "converter-types",
+      "file": "tasks/converter-types.md",
+      "title": "Define ConverterError, OpenAIConverter struct",
+      "status": "completed",
+      "started_at": "2026-03-15T10:11:10Z",
+      "completed_at": "2026-03-15T10:15:28Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "strict-mode",
+      "file": "tasks/strict-mode.md",
+      "title": "Implement strict mode algorithm",
+      "status": "completed",
+      "started_at": "2026-03-15T10:11:10Z",
+      "completed_at": "2026-03-15T10:15:28Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "convert-descriptor",
+      "file": "tasks/convert-descriptor.md",
+      "title": "Implement convert_descriptor",
+      "status": "completed",
+      "started_at": "2026-03-15T10:15:28Z",
+      "completed_at": "2026-03-15T10:18:18Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "convert-registry",
+      "file": "tasks/convert-registry.md",
+      "title": "Implement convert_registry",
+      "status": "completed",
+      "started_at": null,
+      "completed_at": "2026-03-15T10:18:18Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "integration-tests",
+      "file": "tasks/integration-tests.md",
+      "title": "Integration tests",
+      "status": "completed",
+      "started_at": "2026-03-15T10:18:18Z",
+      "completed_at": "2026-03-15T10:20:34Z",
+      "assignee": null,
+      "commits": []
+    }
+  ],
+  "metadata": {
+    "source_doc": "docs/features/converters.md",
+    "created_by": "code-forge:port",
+    "version": "1.0",
+    "ported_from": {
+      "reference_impl": "apcore-mcp-python",
+      "reference_lang": "python",
+      "target_lang": "rust"
+    }
+  }
+}

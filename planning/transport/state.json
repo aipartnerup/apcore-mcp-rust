@@ -1,0 +1,125 @@
+{
+  "feature": "transport",
+  "created": "2026-03-15T09:20:14Z",
+  "updated": "2026-03-15T11:40:25Z",
+  "status": "completed",
+  "execution_order": [
+    "define-transport-error",
+    "refactor-transport-manager-struct",
+    "implement-health-metrics",
+    "implement-stdio-transport",
+    "implement-streamable-http-transport",
+    "implement-sse-transport",
+    "add-transport-unit-tests",
+    "add-transport-integration-tests",
+    "cleanup-and-exports"
+  ],
+  "progress": {
+    "total_tasks": 9,
+    "completed": 9,
+    "in_progress": 0,
+    "pending": 0
+  },
+  "tasks": [
+    {
+      "id": "define-transport-error",
+      "file": "tasks/define-transport-error.md",
+      "title": "Define TransportError enum",
+      "status": "completed",
+      "started_at": "2026-03-15T11:30:39Z",
+      "completed_at": "2026-03-15T11:32:21Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "refactor-transport-manager-struct",
+      "file": "tasks/refactor-transport-manager-struct.md",
+      "title": "Refactor TransportManager struct",
+      "status": "completed",
+      "started_at": "2026-03-15T11:30:39Z",
+      "completed_at": "2026-03-15T11:32:21Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "implement-health-metrics",
+      "file": "tasks/implement-health-metrics.md",
+      "title": "Health and metrics endpoints",
+      "status": "completed",
+      "started_at": "2026-03-15T11:30:39Z",
+      "completed_at": "2026-03-15T11:32:21Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "implement-stdio-transport",
+      "file": "tasks/implement-stdio-transport.md",
+      "title": "Implement run_stdio",
+      "status": "completed",
+      "started_at": "2026-03-15T11:32:21Z",
+      "completed_at": "2026-03-15T11:35:51Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "implement-streamable-http-transport",
+      "file": "tasks/implement-streamable-http-transport.md",
+      "title": "Implement run_streamable_http",
+      "status": "completed",
+      "started_at": "2026-03-15T11:32:21Z",
+      "completed_at": "2026-03-15T11:35:51Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "implement-sse-transport",
+      "file": "tasks/implement-sse-transport.md",
+      "title": "Implement run_sse (deprecated)",
+      "status": "completed",
+      "started_at": "2026-03-15T11:32:21Z",
+      "completed_at": "2026-03-15T11:35:51Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "add-transport-unit-tests",
+      "file": "tasks/add-transport-unit-tests.md",
+      "title": "Transport unit tests",
+      "status": "completed",
+      "started_at": "2026-03-15T11:35:51Z",
+      "completed_at": "2026-03-15T11:40:25Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "add-transport-integration-tests",
+      "file": "tasks/add-transport-integration-tests.md",
+      "title": "Transport integration tests",
+      "status": "completed",
+      "started_at": "2026-03-15T11:35:51Z",
+      "completed_at": "2026-03-15T11:40:25Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "cleanup-and-exports",
+      "file": "tasks/cleanup-and-exports.md",
+      "title": "Cleanup and exports",
+      "status": "completed",
+      "started_at": "2026-03-15T11:35:51Z",
+      "completed_at": "2026-03-15T11:40:25Z",
+      "assignee": null,
+      "commits": []
+    }
+  ],
+  "metadata": {
+    "source_doc": "docs/features/transport.md",
+    "created_by": "code-forge:port",
+    "version": "1.0",
+    "ported_from": {
+      "reference_impl": "apcore-mcp-python",
+      "reference_lang": "python",
+      "target_lang": "rust"
+    }
+  }
+}

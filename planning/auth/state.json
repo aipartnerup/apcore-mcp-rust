@@ -1,0 +1,114 @@
+{
+  "feature": "auth",
+  "created": "2026-03-15T09:14:04Z",
+  "updated": "2026-03-15T10:10:02Z",
+  "status": "completed",
+  "execution_order": [
+    "align-identity-type",
+    "implement-claim-mapping",
+    "implement-jwt-authenticator",
+    "implement-tower-middleware",
+    "add-jwt-authenticator-tests",
+    "add-middleware-tests",
+    "add-integration-tests",
+    "update-module-exports"
+  ],
+  "progress": {
+    "total_tasks": 8,
+    "completed": 8,
+    "in_progress": 0,
+    "pending": 0
+  },
+  "tasks": [
+    {
+      "id": "align-identity-type",
+      "file": "tasks/align-identity-type.md",
+      "title": "Align protocol.rs with apcore::Identity",
+      "status": "completed",
+      "started_at": "2026-03-15T10:03:06Z",
+      "completed_at": "2026-03-15T10:04:17Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "implement-claim-mapping",
+      "file": "tasks/implement-claim-mapping.md",
+      "title": "Complete ClaimMapping struct",
+      "status": "completed",
+      "started_at": "2026-03-15T10:03:06Z",
+      "completed_at": "2026-03-15T10:04:17Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "implement-jwt-authenticator",
+      "file": "tasks/implement-jwt-authenticator.md",
+      "title": "Implement JWTAuthenticator",
+      "status": "completed",
+      "started_at": "2026-03-15T10:04:17Z",
+      "completed_at": "2026-03-15T10:07:28Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "implement-tower-middleware",
+      "file": "tasks/implement-tower-middleware.md",
+      "title": "Implement tower AuthMiddleware",
+      "status": "completed",
+      "started_at": "2026-03-15T10:04:17Z",
+      "completed_at": "2026-03-15T10:07:28Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "add-jwt-authenticator-tests",
+      "file": "tasks/add-jwt-authenticator-tests.md",
+      "title": "JWT authenticator unit tests",
+      "status": "completed",
+      "started_at": "2026-03-15T10:07:28Z",
+      "completed_at": "2026-03-15T10:10:02Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "add-middleware-tests",
+      "file": "tasks/add-middleware-tests.md",
+      "title": "Tower middleware unit tests",
+      "status": "completed",
+      "started_at": "2026-03-15T10:07:28Z",
+      "completed_at": "2026-03-15T10:10:02Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "add-integration-tests",
+      "file": "tasks/add-integration-tests.md",
+      "title": "End-to-end auth flow tests",
+      "status": "completed",
+      "started_at": "2026-03-15T10:07:28Z",
+      "completed_at": "2026-03-15T10:10:02Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "update-module-exports",
+      "file": "tasks/update-module-exports.md",
+      "title": "Clean up mod.rs exports",
+      "status": "completed",
+      "started_at": "2026-03-15T10:07:28Z",
+      "completed_at": "2026-03-15T10:10:02Z",
+      "assignee": null,
+      "commits": []
+    }
+  ],
+  "metadata": {
+    "source_doc": "docs/features/auth.md",
+    "created_by": "code-forge:port",
+    "version": "1.0",
+    "ported_from": {
+      "reference_impl": "apcore-mcp-python",
+      "reference_lang": "python",
+      "target_lang": "rust"
+    }
+  }
+}

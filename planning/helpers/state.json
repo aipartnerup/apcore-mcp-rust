@@ -1,0 +1,92 @@
+{
+  "feature": "helpers",
+  "created": "2026-03-15T09:14:04Z",
+  "updated": "2026-03-15T09:50:51Z",
+  "status": "completed",
+  "execution_order": [
+    "define-callback-types",
+    "define-constants",
+    "implement-report-progress",
+    "implement-elicit",
+    "unit-tests",
+    "integration-smoke-test"
+  ],
+  "progress": {
+    "total_tasks": 6,
+    "completed": 6,
+    "in_progress": 0,
+    "pending": 0
+  },
+  "tasks": [
+    {
+      "id": "define-callback-types",
+      "file": "tasks/define-callback-types.md",
+      "title": "Define callback type aliases and ElicitAction/ElicitResult",
+      "status": "completed",
+      "started_at": "2026-03-15T09:45:57Z",
+      "completed_at": "2026-03-15T09:48:10Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "define-constants",
+      "file": "tasks/define-constants.md",
+      "title": "Define MCP_PROGRESS_KEY and MCP_ELICIT_KEY constants",
+      "status": "completed",
+      "started_at": "2026-03-15T09:45:57Z",
+      "completed_at": "2026-03-15T09:48:10Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "implement-report-progress",
+      "file": "tasks/implement-report-progress.md",
+      "title": "Implement report_progress",
+      "status": "completed",
+      "started_at": "2026-03-15T09:48:10Z",
+      "completed_at": "2026-03-15T09:49:45Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "implement-elicit",
+      "file": "tasks/implement-elicit.md",
+      "title": "Implement elicit",
+      "status": "completed",
+      "started_at": "2026-03-15T09:48:10Z",
+      "completed_at": "2026-03-15T09:49:45Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "unit-tests",
+      "file": "tasks/unit-tests.md",
+      "title": "Comprehensive unit tests",
+      "status": "completed",
+      "started_at": "2026-03-15T09:49:45Z",
+      "completed_at": "2026-03-15T09:50:51Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "integration-smoke-test",
+      "file": "tasks/integration-smoke-test.md",
+      "title": "End-to-end smoke test",
+      "status": "completed",
+      "started_at": "2026-03-15T09:49:45Z",
+      "completed_at": "2026-03-15T09:50:51Z",
+      "assignee": null,
+      "commits": []
+    }
+  ],
+  "metadata": {
+    "source_doc": "docs/features/helpers.md",
+    "created_by": "code-forge:port",
+    "version": "1.0",
+    "ported_from": {
+      "reference_impl": "apcore-mcp-python",
+      "reference_lang": "python",
+      "target_lang": "rust"
+    }
+  }
+}

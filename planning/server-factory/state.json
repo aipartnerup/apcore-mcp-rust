@@ -1,0 +1,125 @@
+{
+  "feature": "server-factory",
+  "created": "2026-03-15T09:20:14Z",
+  "updated": "2026-03-15T10:35:29Z",
+  "status": "completed",
+  "execution_order": [
+    "mcp-types",
+    "tool-annotations-type",
+    "build-tool",
+    "ai-intent-metadata",
+    "build-tools",
+    "register-handlers",
+    "register-resources",
+    "init-options",
+    "factory-integration"
+  ],
+  "progress": {
+    "total_tasks": 9,
+    "completed": 9,
+    "in_progress": 0,
+    "pending": 0
+  },
+  "tasks": [
+    {
+      "id": "mcp-types",
+      "file": "tasks/mcp-types.md",
+      "title": "Define MCP tool/content types",
+      "status": "completed",
+      "started_at": "2026-03-15T10:25:50Z",
+      "completed_at": "2026-03-15T10:27:56Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "tool-annotations-type",
+      "file": "tasks/tool-annotations-type.md",
+      "title": "ToolAnnotations struct and mapping",
+      "status": "completed",
+      "started_at": "2026-03-15T10:25:50Z",
+      "completed_at": "2026-03-15T10:27:56Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "build-tool",
+      "file": "tasks/build-tool.md",
+      "title": "Implement build_tool from descriptor",
+      "status": "completed",
+      "started_at": "2026-03-15T10:27:56Z",
+      "completed_at": "2026-03-15T10:30:10Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "ai-intent-metadata",
+      "file": "tasks/ai-intent-metadata.md",
+      "title": "AI intent key extraction",
+      "status": "completed",
+      "started_at": "2026-03-15T10:27:56Z",
+      "completed_at": "2026-03-15T10:30:10Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "build-tools",
+      "file": "tasks/build-tools.md",
+      "title": "Implement build_tools with filtering",
+      "status": "completed",
+      "started_at": "2026-03-15T10:30:10Z",
+      "completed_at": "2026-03-15T10:35:29Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "register-handlers",
+      "file": "tasks/register-handlers.md",
+      "title": "Register list_tools and call_tool handlers",
+      "status": "completed",
+      "started_at": null,
+      "completed_at": "2026-03-15T10:35:29Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "register-resources",
+      "file": "tasks/register-resources.md",
+      "title": "Register resource handlers",
+      "status": "completed",
+      "started_at": null,
+      "completed_at": "2026-03-15T10:35:29Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "init-options",
+      "file": "tasks/init-options.md",
+      "title": "Build initialization options",
+      "status": "completed",
+      "started_at": null,
+      "completed_at": "2026-03-15T10:35:29Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "factory-integration",
+      "file": "tasks/factory-integration.md",
+      "title": "End-to-end integration",
+      "status": "completed",
+      "started_at": null,
+      "completed_at": "2026-03-15T10:35:29Z",
+      "assignee": null,
+      "commits": []
+    }
+  ],
+  "metadata": {
+    "source_doc": "docs/features/server-factory.md",
+    "created_by": "code-forge:port",
+    "version": "1.0",
+    "ported_from": {
+      "reference_impl": "apcore-mcp-python",
+      "reference_lang": "python",
+      "target_lang": "rust"
+    }
+  }
+}

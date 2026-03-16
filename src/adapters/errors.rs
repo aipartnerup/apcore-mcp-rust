@@ -1,0 +1,543 @@
+//! ErrorMapper — translates apcore errors to MCP error responses.
+//!
+//! Converts [`apcore::errors::ModuleError`] into [`McpErrorResponse`], sanitizing
+//! internal and ACL error codes, formatting validation errors, handling
+//! approval-related codes, and attaching AI guidance fields in camelCase.
+
+use apcore::errors::{ErrorCode as ApcoreErrorCode, ModuleError};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// Error codes that represent internal failures — sanitized to a generic
+/// message before returning to the MCP client.
+const INTERNAL_ERROR_CODES: &[ApcoreErrorCode] = &[
+    ApcoreErrorCode::CallDepthExceeded,
+    ApcoreErrorCode::CircularCall,
+    ApcoreErrorCode::CallFrequencyExceeded,
+];
+
+/// Error codes that require detail sanitization (hide sensitive info).
+const SANITIZED_ERROR_CODES: &[ApcoreErrorCode] = &[ApcoreErrorCode::AclDenied];
+
+/// Structured MCP error response.
+///
+/// Wire format uses camelCase keys to match MCP/TypeScript convention.
+/// Optional fields are omitted when `None`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpErrorResponse {
+    pub is_error: bool,
+    pub error_type: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai_guidance: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_fixable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggestion: Option<String>,
+}
+
+/// Maps apcore execution errors to MCP-compatible error content.
+pub struct ErrorMapper;
+
+impl ErrorMapper {
+    /// Convert an apcore [`ModuleError`] into an [`McpErrorResponse`].
+    ///
+    /// Internal errors are sanitized to avoid leaking implementation details.
+    /// ACL errors hide caller information. Validation errors are reformatted.
+    /// Approval-related errors receive special handling.
+    pub fn to_mcp_error(error: &ModuleError) -> McpErrorResponse {
+        let code = error.code;
+        let error_type = error_code_to_string(&code);
+
+        // Internal codes → generic message, no details
+        if INTERNAL_ERROR_CODES.contains(&code) {
+            return McpErrorResponse {
+                is_error: true,
+                error_type,
+                message: "Internal error occurred".to_string(),
+                details: None,
+                retryable: None,
+                ai_guidance: None,
+                user_fixable: None,
+                suggestion: None,
+            };
+        }
+
+        // ACL codes → "Access denied", no details
+        if SANITIZED_ERROR_CODES.contains(&code) {
+            return McpErrorResponse {
+                is_error: true,
+                error_type,
+                message: "Access denied".to_string(),
+                details: None,
+                retryable: None,
+                ai_guidance: None,
+                user_fixable: None,
+                suggestion: None,
+            };
+        }
+
+        // Schema validation → format field-level errors
+        if code == ApcoreErrorCode::SchemaValidationError {
+            let formatted = format_validation_errors(&error.details);
+            let details_value = if error.details.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_value(&error.details).unwrap_or(Value::Null))
+            };
+            let mut resp = McpErrorResponse {
+                is_error: true,
+                error_type,
+                message: formatted,
+                details: details_value,
+                retryable: None,
+                ai_guidance: None,
+                user_fixable: None,
+                suggestion: None,
+            };
+            attach_ai_guidance(error, &mut resp);
+            return resp;
+        }
+
+        // Approval pending → narrow details to only approvalId
+        if code == ApcoreErrorCode::ApprovalPending {
+            let narrowed = error
+                .details
+                .get("approval_id")
+                .map(|v| serde_json::json!({ "approvalId": v }));
+            let mut resp = McpErrorResponse {
+                is_error: true,
+                error_type,
+                message: error.message.clone(),
+                details: narrowed,
+                retryable: None,
+                ai_guidance: None,
+                user_fixable: None,
+                suggestion: None,
+            };
+            attach_ai_guidance(error, &mut resp);
+            return resp;
+        }
+
+        // Approval timeout → pass through with retryable=true
+        if code == ApcoreErrorCode::ApprovalTimeout {
+            let details_value = if error.details.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_value(&error.details).unwrap_or(Value::Null))
+            };
+            let mut resp = McpErrorResponse {
+                is_error: true,
+                error_type,
+                message: error.message.clone(),
+                details: details_value,
+                retryable: Some(true),
+                ai_guidance: None,
+                user_fixable: None,
+                suggestion: None,
+            };
+            attach_ai_guidance(error, &mut resp);
+            return resp;
+        }
+
+        // Approval denied → extract reason
+        if code == ApcoreErrorCode::ApprovalDenied {
+            let reason = error.details.get("reason");
+            let details_value = match reason {
+                Some(r) => Some(serde_json::json!({ "reason": r })),
+                None => {
+                    if error.details.is_empty() {
+                        None
+                    } else {
+                        Some(serde_json::to_value(&error.details).unwrap_or(Value::Null))
+                    }
+                }
+            };
+            let mut resp = McpErrorResponse {
+                is_error: true,
+                error_type,
+                message: error.message.clone(),
+                details: details_value,
+                retryable: None,
+                ai_guidance: None,
+                user_fixable: None,
+                suggestion: None,
+            };
+            attach_ai_guidance(error, &mut resp);
+            return resp;
+        }
+
+        // Execution cancelled → specific message with retryable=true
+        if code == ApcoreErrorCode::ExecutionCancelled {
+            let mut resp = McpErrorResponse {
+                is_error: true,
+                error_type,
+                message: "Execution was cancelled".to_string(),
+                details: None,
+                retryable: Some(true),
+                ai_guidance: None,
+                user_fixable: None,
+                suggestion: None,
+            };
+            attach_ai_guidance(error, &mut resp);
+            return resp;
+        }
+
+        // Default: pass through message and details
+        let details_value = if error.details.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_value(&error.details).unwrap_or(Value::Null))
+        };
+        let mut resp = McpErrorResponse {
+            is_error: true,
+            error_type,
+            message: error.message.clone(),
+            details: details_value,
+            retryable: None,
+            ai_guidance: None,
+            user_fixable: None,
+            suggestion: None,
+        };
+        attach_ai_guidance(error, &mut resp);
+        resp
+    }
+}
+
+/// Attach AI guidance fields from the error to the response.
+///
+/// Reads snake_case fields from the apcore error and writes camelCase
+/// keys to the MCP result. Skips `None` values and does not overwrite
+/// existing (already-set) fields.
+fn attach_ai_guidance(error: &ModuleError, resp: &mut McpErrorResponse) {
+    if resp.retryable.is_none() {
+        resp.retryable = error.retryable;
+    }
+    if resp.ai_guidance.is_none() {
+        resp.ai_guidance = error.ai_guidance.clone();
+    }
+    if resp.user_fixable.is_none() {
+        resp.user_fixable = error.user_fixable;
+    }
+    if resp.suggestion.is_none() {
+        resp.suggestion = error.suggestion.clone();
+    }
+}
+
+/// Format schema validation field-level errors into a readable message.
+///
+/// Extracts the `"errors"` array from details and formats each entry as
+/// `"field: message"`. Returns a fallback if no errors are present.
+fn format_validation_errors(
+    details: &std::collections::HashMap<String, Value>,
+) -> String {
+    let errors = match details.get("errors") {
+        Some(Value::Array(arr)) => arr,
+        _ => return "Schema validation failed".to_string(),
+    };
+
+    if errors.is_empty() {
+        return "Schema validation failed".to_string();
+    }
+
+    let lines: Vec<String> = errors
+        .iter()
+        .map(|e| {
+            let field = e
+                .get("field")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let msg = e
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("invalid");
+            format!("  {field}: {msg}")
+        })
+        .collect();
+
+    format!("Schema validation failed:\n{}", lines.join("\n"))
+}
+
+/// Convert an apcore [`ApcoreErrorCode`] to its SCREAMING_SNAKE_CASE string.
+fn error_code_to_string(code: &ApcoreErrorCode) -> String {
+    serde_json::to_value(code)
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_else(|| format!("{code:?}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// Helper: create a basic ModuleError with the given code and message.
+    fn make_error(code: ApcoreErrorCode, message: &str) -> ModuleError {
+        ModuleError::new(code, message)
+    }
+
+    /// Helper: create a ModuleError with details.
+    fn make_error_with_details(
+        code: ApcoreErrorCode,
+        message: &str,
+        details: HashMap<String, Value>,
+    ) -> ModuleError {
+        ModuleError::new(code, message).with_details(details)
+    }
+
+    // ---- Internal error sanitization ----
+
+    #[test]
+    fn test_internal_error_sanitized() {
+        let err = make_error(ApcoreErrorCode::CallDepthExceeded, "depth 42 exceeded limit");
+        let resp = ErrorMapper::to_mcp_error(&err);
+        assert!(resp.is_error);
+        assert_eq!(resp.error_type, "CALL_DEPTH_EXCEEDED");
+        assert_eq!(resp.message, "Internal error occurred");
+        assert!(resp.details.is_none());
+    }
+
+    #[test]
+    fn test_circular_call_sanitized() {
+        let err = make_error(ApcoreErrorCode::CircularCall, "a -> b -> a");
+        let resp = ErrorMapper::to_mcp_error(&err);
+        assert!(resp.is_error);
+        assert_eq!(resp.error_type, "CIRCULAR_CALL");
+        assert_eq!(resp.message, "Internal error occurred");
+        assert!(resp.details.is_none());
+    }
+
+    #[test]
+    fn test_call_frequency_sanitized() {
+        let err = make_error(
+            ApcoreErrorCode::CallFrequencyExceeded,
+            "module called 100 times",
+        );
+        let resp = ErrorMapper::to_mcp_error(&err);
+        assert!(resp.is_error);
+        assert_eq!(resp.error_type, "CALL_FREQUENCY_EXCEEDED");
+        assert_eq!(resp.message, "Internal error occurred");
+        assert!(resp.details.is_none());
+    }
+
+    // ---- ACL denied sanitization ----
+
+    #[test]
+    fn test_acl_denied_sanitized() {
+        let mut details = HashMap::new();
+        details.insert(
+            "caller_id".to_string(),
+            Value::String("secret-caller".to_string()),
+        );
+        let err = make_error_with_details(
+            ApcoreErrorCode::AclDenied,
+            "caller X denied access to Y",
+            details,
+        );
+        let resp = ErrorMapper::to_mcp_error(&err);
+        assert!(resp.is_error);
+        assert_eq!(resp.error_type, "ACL_DENIED");
+        assert_eq!(resp.message, "Access denied");
+        assert!(resp.details.is_none(), "ACL details should be stripped");
+    }
+
+    // ---- Schema validation formatting ----
+
+    #[test]
+    fn test_schema_validation_formatted() {
+        let errors_arr = serde_json::json!([
+            {"field": "name", "message": "required"},
+            {"field": "age", "message": "must be positive"}
+        ]);
+        let mut details = HashMap::new();
+        details.insert("errors".to_string(), errors_arr);
+        let err = make_error_with_details(
+            ApcoreErrorCode::SchemaValidationError,
+            "Validation failed",
+            details,
+        );
+        let resp = ErrorMapper::to_mcp_error(&err);
+        assert!(resp.is_error);
+        assert_eq!(resp.error_type, "SCHEMA_VALIDATION_ERROR");
+        assert!(resp.message.contains("Schema validation failed:"));
+        assert!(resp.message.contains("name: required"));
+        assert!(resp.message.contains("age: must be positive"));
+        assert!(resp.details.is_some());
+    }
+
+    #[test]
+    fn test_schema_validation_empty_errors() {
+        let mut details = HashMap::new();
+        details.insert("errors".to_string(), serde_json::json!([]));
+        let err = make_error_with_details(
+            ApcoreErrorCode::SchemaValidationError,
+            "Validation failed",
+            details,
+        );
+        let resp = ErrorMapper::to_mcp_error(&err);
+        assert_eq!(resp.message, "Schema validation failed");
+    }
+
+    // ---- Approval pending ----
+
+    #[test]
+    fn test_approval_pending_narrowed() {
+        let mut details = HashMap::new();
+        details.insert(
+            "approval_id".to_string(),
+            Value::String("abc-123".to_string()),
+        );
+        details.insert(
+            "module_id".to_string(),
+            Value::String("secret.module".to_string()),
+        );
+        let err = make_error_with_details(
+            ApcoreErrorCode::ApprovalPending,
+            "Awaiting approval",
+            details,
+        );
+        let resp = ErrorMapper::to_mcp_error(&err);
+        assert!(resp.is_error);
+        assert_eq!(resp.error_type, "APPROVAL_PENDING");
+        assert_eq!(resp.message, "Awaiting approval");
+        let d = resp.details.unwrap();
+        assert_eq!(d.get("approvalId").unwrap().as_str().unwrap(), "abc-123");
+        // module_id should NOT be present
+        assert!(d.get("module_id").is_none());
+    }
+
+    // ---- Approval timeout ----
+
+    #[test]
+    fn test_approval_timeout_retryable() {
+        let err = make_error(ApcoreErrorCode::ApprovalTimeout, "Timed out waiting");
+        let resp = ErrorMapper::to_mcp_error(&err);
+        assert!(resp.is_error);
+        assert_eq!(resp.error_type, "APPROVAL_TIMEOUT");
+        assert_eq!(resp.retryable, Some(true));
+    }
+
+    // ---- Approval denied ----
+
+    #[test]
+    fn test_approval_denied_reason() {
+        let mut details = HashMap::new();
+        details.insert(
+            "reason".to_string(),
+            Value::String("Policy violation".to_string()),
+        );
+        details.insert(
+            "module_id".to_string(),
+            Value::String("mod.x".to_string()),
+        );
+        let err = make_error_with_details(
+            ApcoreErrorCode::ApprovalDenied,
+            "Approval denied",
+            details,
+        );
+        let resp = ErrorMapper::to_mcp_error(&err);
+        assert!(resp.is_error);
+        assert_eq!(resp.error_type, "APPROVAL_DENIED");
+        let d = resp.details.unwrap();
+        assert_eq!(
+            d.get("reason").unwrap().as_str().unwrap(),
+            "Policy violation"
+        );
+    }
+
+    // ---- AI guidance fields ----
+
+    #[test]
+    fn test_ai_guidance_fields() {
+        let err = ModuleError::new(ApcoreErrorCode::ModuleExecuteError, "something broke")
+            .with_retryable(true)
+            .with_ai_guidance("Try reducing batch size")
+            .with_suggestion("Use smaller input");
+        let resp = ErrorMapper::to_mcp_error(&err);
+        assert_eq!(resp.retryable, Some(true));
+        assert_eq!(
+            resp.ai_guidance.as_deref(),
+            Some("Try reducing batch size")
+        );
+        assert_eq!(resp.suggestion.as_deref(), Some("Use smaller input"));
+    }
+
+    #[test]
+    fn test_ai_guidance_none_omitted() {
+        let err = make_error(ApcoreErrorCode::ModuleNotFound, "not found");
+        let resp = ErrorMapper::to_mcp_error(&err);
+        assert!(resp.retryable.is_none());
+        assert!(resp.ai_guidance.is_none());
+        assert!(resp.user_fixable.is_none());
+        assert!(resp.suggestion.is_none());
+
+        // Verify they are omitted from JSON
+        let json = serde_json::to_value(&resp).unwrap();
+        assert!(json.get("retryable").is_none());
+        assert!(json.get("aiGuidance").is_none());
+        assert!(json.get("userFixable").is_none());
+        assert!(json.get("suggestion").is_none());
+    }
+
+    // ---- Execution cancelled ----
+
+    #[test]
+    fn test_execution_cancelled() {
+        let err = make_error(ApcoreErrorCode::ExecutionCancelled, "user cancelled");
+        let resp = ErrorMapper::to_mcp_error(&err);
+        assert!(resp.is_error);
+        assert_eq!(resp.error_type, "EXECUTION_CANCELLED");
+        assert_eq!(resp.message, "Execution was cancelled");
+        assert!(resp.details.is_none());
+        assert_eq!(resp.retryable, Some(true));
+    }
+
+    // ---- Unknown / passthrough ----
+
+    #[test]
+    fn test_unknown_error_passthrough() {
+        let mut details = HashMap::new();
+        details.insert(
+            "module_id".to_string(),
+            Value::String("core.math".to_string()),
+        );
+        let err = make_error_with_details(
+            ApcoreErrorCode::ModuleExecuteError,
+            "division by zero",
+            details,
+        );
+        let resp = ErrorMapper::to_mcp_error(&err);
+        assert!(resp.is_error);
+        assert_eq!(resp.error_type, "MODULE_EXECUTE_ERROR");
+        assert_eq!(resp.message, "division by zero");
+        assert!(resp.details.is_some());
+    }
+
+    // ---- camelCase output keys ----
+
+    #[test]
+    fn test_output_keys_camel_case() {
+        let err = ModuleError::new(ApcoreErrorCode::ModuleTimeout, "timed out")
+            .with_retryable(true)
+            .with_ai_guidance("increase timeout");
+        let resp = ErrorMapper::to_mcp_error(&err);
+        let json = serde_json::to_value(&resp).unwrap();
+
+        // Check camelCase keys
+        assert!(json.get("isError").is_some());
+        assert!(json.get("errorType").is_some());
+        assert!(json.get("message").is_some());
+        assert!(json.get("aiGuidance").is_some());
+
+        // Ensure snake_case keys are NOT present
+        assert!(json.get("is_error").is_none());
+        assert!(json.get("error_type").is_none());
+        assert!(json.get("ai_guidance").is_none());
+        assert!(json.get("user_fixable").is_none());
+    }
+}

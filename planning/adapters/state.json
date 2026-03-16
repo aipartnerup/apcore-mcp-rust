@@ -1,0 +1,92 @@
+{
+  "feature": "adapters",
+  "created": "2026-03-15T09:14:04Z",
+  "updated": "2026-03-15T10:00:49Z",
+  "status": "completed",
+  "execution_order": [
+    "adapter-setup",
+    "annotations-mapper",
+    "error-mapper",
+    "schema-converter",
+    "id-normalizer",
+    "approval-handler"
+  ],
+  "progress": {
+    "total_tasks": 6,
+    "completed": 6,
+    "in_progress": 0,
+    "pending": 0
+  },
+  "tasks": [
+    {
+      "id": "adapter-setup",
+      "file": "tasks/adapter-setup.md",
+      "title": "Scaffold shared types and module re-exports",
+      "status": "completed",
+      "started_at": "2026-03-15T09:54:07Z",
+      "completed_at": "2026-03-15T09:55:43Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "annotations-mapper",
+      "file": "tasks/annotations-mapper.md",
+      "title": "Implement AnnotationMapper",
+      "status": "completed",
+      "started_at": "2026-03-15T09:55:43Z",
+      "completed_at": "2026-03-15T09:58:10Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "error-mapper",
+      "file": "tasks/error-mapper.md",
+      "title": "Implement ErrorMapper with sanitization",
+      "status": "completed",
+      "started_at": "2026-03-15T09:55:43Z",
+      "completed_at": "2026-03-15T09:58:10Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "schema-converter",
+      "file": "tasks/schema-converter.md",
+      "title": "Implement SchemaConverter with $ref inlining",
+      "status": "completed",
+      "started_at": "2026-03-15T09:55:43Z",
+      "completed_at": "2026-03-15T09:58:10Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "id-normalizer",
+      "file": "tasks/id-normalizer.md",
+      "title": "Implement ModuleIDNormalizer",
+      "status": "completed",
+      "started_at": "2026-03-15T09:58:10Z",
+      "completed_at": "2026-03-15T10:00:49Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "approval-handler",
+      "file": "tasks/approval-handler.md",
+      "title": "Implement ElicitationApprovalHandler",
+      "status": "completed",
+      "started_at": "2026-03-15T09:58:10Z",
+      "completed_at": "2026-03-15T10:00:49Z",
+      "assignee": null,
+      "commits": []
+    }
+  ],
+  "metadata": {
+    "source_doc": "docs/features/adapters.md",
+    "created_by": "code-forge:port",
+    "version": "1.0",
+    "ported_from": {
+      "reference_impl": "apcore-mcp-python",
+      "reference_lang": "python",
+      "target_lang": "rust"
+    }
+  }
+}

@@ -1,0 +1,136 @@
+{
+  "feature": "apcore-mcp",
+  "created": "2026-03-15T09:25:53Z",
+  "updated": "2026-03-15T13:16:03Z",
+  "status": "completed",
+  "execution_order": [
+    "backend-source-enum",
+    "config-and-error-types",
+    "resolve-utils",
+    "builder-pattern",
+    "struct-and-accessors",
+    "build-server-components",
+    "serve-methods",
+    "to-openai-tools",
+    "convenience-functions",
+    "integration-wiring"
+  ],
+  "progress": {
+    "total_tasks": 10,
+    "completed": 10,
+    "in_progress": 0,
+    "pending": 0
+  },
+  "tasks": [
+    {
+      "id": "backend-source-enum",
+      "file": "tasks/backend-source-enum.md",
+      "title": "Define BackendSource enum",
+      "status": "completed",
+      "started_at": "2026-03-15T13:01:13Z",
+      "completed_at": "2026-03-15T13:04:10Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "config-and-error-types",
+      "file": "tasks/config-and-error-types.md",
+      "title": "APCoreMCPConfig and error types",
+      "status": "completed",
+      "started_at": "2026-03-15T13:01:13Z",
+      "completed_at": "2026-03-15T13:04:10Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "resolve-utils",
+      "file": "tasks/resolve-utils.md",
+      "title": "Update resolve helpers",
+      "status": "completed",
+      "started_at": "2026-03-15T13:01:13Z",
+      "completed_at": "2026-03-15T13:04:10Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "builder-pattern",
+      "file": "tasks/builder-pattern.md",
+      "title": "APCoreMCPBuilder implementation",
+      "status": "completed",
+      "started_at": "2026-03-15T13:04:10Z",
+      "completed_at": "2026-03-15T13:08:07Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "struct-and-accessors",
+      "file": "tasks/struct-and-accessors.md",
+      "title": "APCoreMCP struct and accessors",
+      "status": "completed",
+      "started_at": "2026-03-15T13:04:10Z",
+      "completed_at": "2026-03-15T13:08:07Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "build-server-components",
+      "file": "tasks/build-server-components.md",
+      "title": "Shared build_server_components",
+      "status": "completed",
+      "started_at": "2026-03-15T13:04:10Z",
+      "completed_at": "2026-03-15T13:08:07Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "serve-methods",
+      "file": "tasks/serve-methods.md",
+      "title": "serve() and async_serve()",
+      "status": "completed",
+      "started_at": "2026-03-15T13:08:07Z",
+      "completed_at": "2026-03-15T13:16:03Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "to-openai-tools",
+      "file": "tasks/to-openai-tools.md",
+      "title": "to_openai_tools() delegation",
+      "status": "completed",
+      "started_at": "2026-03-15T13:08:07Z",
+      "completed_at": "2026-03-15T13:16:03Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "convenience-functions",
+      "file": "tasks/convenience-functions.md",
+      "title": "Top-level convenience functions",
+      "status": "completed",
+      "started_at": "2026-03-15T13:08:07Z",
+      "completed_at": "2026-03-15T13:16:03Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "integration-wiring",
+      "file": "tasks/integration-wiring.md",
+      "title": "Update lib.rs re-exports",
+      "status": "completed",
+      "started_at": "2026-03-15T13:08:07Z",
+      "completed_at": "2026-03-15T13:16:03Z",
+      "assignee": null,
+      "commits": []
+    }
+  ],
+  "metadata": {
+    "source_doc": "docs/features/apcore-mcp.md",
+    "created_by": "code-forge:port",
+    "version": "1.0",
+    "ported_from": {
+      "reference_impl": "apcore-mcp-python",
+      "reference_lang": "python",
+      "target_lang": "rust"
+    }
+  }
+}

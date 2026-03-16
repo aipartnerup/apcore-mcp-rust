@@ -1,0 +1,125 @@
+{
+  "feature": "execution-router",
+  "created": "2026-03-15T09:20:14Z",
+  "updated": "2026-03-15T10:50:28Z",
+  "status": "completed",
+  "execution_order": [
+    "executor-trait",
+    "deep-merge",
+    "output-formatting",
+    "context-construction",
+    "non-streaming-path",
+    "streaming-path",
+    "input-validation",
+    "handle-call-orchestrator",
+    "integration-tests"
+  ],
+  "progress": {
+    "total_tasks": 9,
+    "completed": 9,
+    "in_progress": 0,
+    "pending": 0
+  },
+  "tasks": [
+    {
+      "id": "executor-trait",
+      "file": "tasks/executor-trait.md",
+      "title": "Define Executor trait",
+      "status": "completed",
+      "started_at": "2026-03-15T10:38:40Z",
+      "completed_at": "2026-03-15T10:41:10Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "deep-merge",
+      "file": "tasks/deep-merge.md",
+      "title": "Implement deep_merge for Value",
+      "status": "completed",
+      "started_at": "2026-03-15T10:38:40Z",
+      "completed_at": "2026-03-15T10:41:10Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "output-formatting",
+      "file": "tasks/output-formatting.md",
+      "title": "Output formatter with JSON fallback",
+      "status": "completed",
+      "started_at": "2026-03-15T10:38:40Z",
+      "completed_at": "2026-03-15T10:41:10Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "context-construction",
+      "file": "tasks/context-construction.md",
+      "title": "Build per-call Context",
+      "status": "completed",
+      "started_at": "2026-03-15T10:41:10Z",
+      "completed_at": "2026-03-15T10:45:12Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "non-streaming-path",
+      "file": "tasks/non-streaming-path.md",
+      "title": "Implement non-streaming call path",
+      "status": "completed",
+      "started_at": "2026-03-15T10:41:10Z",
+      "completed_at": "2026-03-15T10:45:12Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "streaming-path",
+      "file": "tasks/streaming-path.md",
+      "title": "Implement streaming path",
+      "status": "completed",
+      "started_at": "2026-03-15T10:41:10Z",
+      "completed_at": "2026-03-15T10:45:12Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "input-validation",
+      "file": "tasks/input-validation.md",
+      "title": "Pre-execution validation",
+      "status": "completed",
+      "started_at": "2026-03-15T10:45:12Z",
+      "completed_at": "2026-03-15T10:50:28Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "handle-call-orchestrator",
+      "file": "tasks/handle-call-orchestrator.md",
+      "title": "Wire handle_call orchestrator",
+      "status": "completed",
+      "started_at": "2026-03-15T10:45:12Z",
+      "completed_at": "2026-03-15T10:50:28Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "integration-tests",
+      "file": "tasks/integration-tests.md",
+      "title": "End-to-end tests",
+      "status": "completed",
+      "started_at": "2026-03-15T10:45:12Z",
+      "completed_at": "2026-03-15T10:50:28Z",
+      "assignee": null,
+      "commits": []
+    }
+  ],
+  "metadata": {
+    "source_doc": "docs/features/execution-router.md",
+    "created_by": "code-forge:port",
+    "version": "1.0",
+    "ported_from": {
+      "reference_impl": "apcore-mcp-python",
+      "reference_lang": "python",
+      "target_lang": "rust"
+    }
+  }
+}

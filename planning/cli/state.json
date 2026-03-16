@@ -1,0 +1,103 @@
+{
+  "feature": "cli",
+  "created": "2026-03-15T09:25:53Z",
+  "updated": "2026-03-15T14:28:38Z",
+  "status": "completed",
+  "execution_order": [
+    "define-cli-enums",
+    "implement-tracing-init",
+    "implement-cli-args",
+    "implement-run-function",
+    "add-cli-unit-tests",
+    "add-cli-integration-tests",
+    "update-binary-entrypoint"
+  ],
+  "progress": {
+    "total_tasks": 7,
+    "completed": 7,
+    "in_progress": 0,
+    "pending": 0
+  },
+  "tasks": [
+    {
+      "id": "define-cli-enums",
+      "file": "tasks/define-cli-enums.md",
+      "title": "Define Transport, ApprovalMode, LogLevel enums",
+      "status": "completed",
+      "started_at": "2026-03-15T14:20:13Z",
+      "completed_at": "2026-03-15T14:22:13Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "implement-tracing-init",
+      "file": "tasks/implement-tracing-init.md",
+      "title": "Tracing subscriber init",
+      "status": "completed",
+      "started_at": "2026-03-15T14:20:13Z",
+      "completed_at": "2026-03-15T14:22:13Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "implement-cli-args",
+      "file": "tasks/implement-cli-args.md",
+      "title": "Full CliArgs struct",
+      "status": "completed",
+      "started_at": "2026-03-15T14:20:13Z",
+      "completed_at": "2026-03-15T14:22:13Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "implement-run-function",
+      "file": "tasks/implement-run-function.md",
+      "title": "Implement run() with validation",
+      "status": "completed",
+      "started_at": "2026-03-15T14:22:13Z",
+      "completed_at": "2026-03-15T14:28:38Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "add-cli-unit-tests",
+      "file": "tasks/add-cli-unit-tests.md",
+      "title": "CLI unit tests",
+      "status": "completed",
+      "started_at": "2026-03-15T14:22:13Z",
+      "completed_at": "2026-03-15T14:28:38Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "add-cli-integration-tests",
+      "file": "tasks/add-cli-integration-tests.md",
+      "title": "CLI integration tests",
+      "status": "completed",
+      "started_at": "2026-03-15T14:22:13Z",
+      "completed_at": "2026-03-15T14:28:38Z",
+      "assignee": null,
+      "commits": []
+    },
+    {
+      "id": "update-binary-entrypoint",
+      "file": "tasks/update-binary-entrypoint.md",
+      "title": "Update bin/apcore-mcp.rs",
+      "status": "completed",
+      "started_at": "2026-03-15T14:22:13Z",
+      "completed_at": "2026-03-15T14:28:38Z",
+      "assignee": null,
+      "commits": []
+    }
+  ],
+  "metadata": {
+    "source_doc": "docs/features/cli.md",
+    "created_by": "code-forge:port",
+    "version": "1.0",
+    "ported_from": {
+      "reference_impl": "apcore-mcp-python",
+      "reference_lang": "python",
+      "target_lang": "rust"
+    }
+  }
+}
