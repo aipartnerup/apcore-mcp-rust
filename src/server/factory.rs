@@ -18,9 +18,8 @@ use crate::adapters::schema::SchemaConverter;
 use crate::server::router::ExecutionRouter;
 use crate::server::server::{FactoryError, MCPServer, MCPServerConfig};
 use crate::server::types::{
-    CallToolResult, InitializationOptions, ReadResourceContents, Resource,
-    ResourcesCapability, ServerCapabilities, TextContent, Tool,
-    ToolAnnotations, ToolsCapability,
+    CallToolResult, InitializationOptions, ReadResourceContents, Resource, ResourcesCapability,
+    ServerCapabilities, TextContent, Tool, ToolAnnotations, ToolsCapability,
 };
 
 /// AI intent metadata keys extracted from module metadata and appended
@@ -146,6 +145,12 @@ pub struct MCPServerFactory {
     annotation_mapper: AnnotationMapper,
 }
 
+impl Default for MCPServerFactory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MCPServerFactory {
     /// Create a new factory with default components.
     pub fn new() -> Self {
@@ -196,7 +201,7 @@ impl MCPServerFactory {
 
         // Build _meta
         let meta_value = ToolAnnotationBuilder::build_meta_value(Some(&descriptor.annotations));
-        let meta = if meta_value.as_object().map_or(true, |m| m.is_empty()) {
+        let meta = if meta_value.as_object().is_none_or(|m| m.is_empty()) {
             None
         } else {
             Some(meta_value)
@@ -274,9 +279,7 @@ impl MCPServerFactory {
 
         // list_tools handler: returns a clone of the tools list
         let tools_clone = Arc::clone(&tools);
-        server.list_tools_handler = Some(Arc::new(move || {
-            tools_clone.as_ref().clone()
-        }));
+        server.list_tools_handler = Some(Arc::new(move || tools_clone.as_ref().clone()));
 
         // call_tool handler: delegates to the execution router
         let router_clone = Arc::clone(&router);
@@ -291,12 +294,7 @@ impl MCPServerFactory {
                     .into_iter()
                     .filter(|item| item.content_type == "text")
                     .map(|item| {
-                        TextContent::new(
-                            item.data
-                                .as_str()
-                                .unwrap_or_default()
-                                .to_string(),
-                        )
+                        TextContent::new(item.data.as_str().unwrap_or_default().to_string())
                     })
                     .collect();
 
@@ -317,11 +315,7 @@ impl MCPServerFactory {
     ///
     /// Since there is no Rust MCP SDK yet, handlers are stored as closures
     /// on the `MCPServer` struct.
-    pub fn register_resource_handlers(
-        &self,
-        server: &mut MCPServer,
-        registry: &Registry,
-    ) {
+    pub fn register_resource_handlers(&self, server: &mut MCPServer, registry: &Registry) {
         // Build docs map: module_id -> description (as documentation)
         let mut docs_map: HashMap<String, String> = HashMap::new();
         for module_id in registry.list(None, None) {
@@ -417,10 +411,7 @@ mod tests {
         }
     }
 
-    fn make_descriptor_with_tags(
-        name: &str,
-        tags: Vec<String>,
-    ) -> ModuleDescriptor {
+    fn make_descriptor_with_tags(name: &str, tags: Vec<String>) -> ModuleDescriptor {
         ModuleDescriptor {
             name: name.to_string(),
             annotations: ModuleAnnotations::default(),
@@ -471,9 +462,7 @@ mod tests {
     }
 
     /// Helper to create a registry with mock modules.
-    fn make_registry_with_modules(
-        modules: Vec<(&str, &str, Vec<String>)>,
-    ) -> Registry {
+    fn make_registry_with_modules(modules: Vec<(&str, &str, Vec<String>)>) -> Registry {
         let mut registry = Registry::new();
         for (name, desc, tags) in modules {
             let module = Box::new(MockModule::new(desc));
@@ -507,7 +496,9 @@ mod tests {
     fn test_build_tool_description() {
         let factory = make_factory();
         let desc = make_descriptor("mod.test", ModuleAnnotations::default());
-        let tool = factory.build_tool(&desc, "Reads files from disk", None).unwrap();
+        let tool = factory
+            .build_tool(&desc, "Reads files from disk", None)
+            .unwrap();
         assert_eq!(tool.description, "Reads files from disk");
     }
 
@@ -523,9 +514,11 @@ mod tests {
     #[test]
     fn test_build_tool_annotations_mapped() {
         let factory = make_factory();
-        let mut ann = ModuleAnnotations::default();
-        ann.readonly = true;
-        ann.destructive = true;
+        let ann = ModuleAnnotations {
+            readonly: true,
+            destructive: true,
+            ..Default::default()
+        };
         let desc = make_descriptor("mod.test", ann);
         let tool = factory.build_tool(&desc, "desc", None).unwrap();
         let annotations = tool.annotations.unwrap();
@@ -536,8 +529,10 @@ mod tests {
     #[test]
     fn test_build_tool_meta_requires_approval() {
         let factory = make_factory();
-        let mut ann = ModuleAnnotations::default();
-        ann.requires_approval = true;
+        let ann = ModuleAnnotations {
+            requires_approval: true,
+            ..Default::default()
+        };
         let desc = make_descriptor("mod.test", ann);
         let tool = factory.build_tool(&desc, "desc", None).unwrap();
         let meta = tool.meta.unwrap();
@@ -548,8 +543,10 @@ mod tests {
     #[test]
     fn test_build_tool_meta_streaming() {
         let factory = make_factory();
-        let mut ann = ModuleAnnotations::default();
-        ann.streaming = true;
+        let ann = ModuleAnnotations {
+            streaming: true,
+            ..Default::default()
+        };
         let desc = make_descriptor("mod.test", ann);
         let tool = factory.build_tool(&desc, "desc", None).unwrap();
         let meta = tool.meta.unwrap();
@@ -560,9 +557,11 @@ mod tests {
     #[test]
     fn test_build_tool_meta_both() {
         let factory = make_factory();
-        let mut ann = ModuleAnnotations::default();
-        ann.requires_approval = true;
-        ann.streaming = true;
+        let ann = ModuleAnnotations {
+            requires_approval: true,
+            streaming: true,
+            ..Default::default()
+        };
         let desc = make_descriptor("mod.test", ann);
         let tool = factory.build_tool(&desc, "desc", None).unwrap();
         let meta = tool.meta.unwrap();
@@ -575,7 +574,10 @@ mod tests {
         let factory = make_factory();
         let desc = make_descriptor("mod.test", ModuleAnnotations::default());
         let tool = factory.build_tool(&desc, "desc", None).unwrap();
-        assert!(tool.meta.is_none(), "default annotations should produce no _meta");
+        assert!(
+            tool.meta.is_none(),
+            "default annotations should produce no _meta"
+        );
     }
 
     // ---- AI intent / enrich_description tests ----
@@ -596,16 +598,25 @@ mod tests {
     #[test]
     fn test_when_to_use_appended() {
         let mut metadata = HashMap::new();
-        metadata.insert("x-when-to-use".to_string(), "Use for reading files".to_string());
+        metadata.insert(
+            "x-when-to-use".to_string(),
+            "Use for reading files".to_string(),
+        );
         let result = enrich_description("Base description", Some(&metadata));
-        assert_eq!(result, "Base description\n\nWhen To Use: Use for reading files");
+        assert_eq!(
+            result,
+            "Base description\n\nWhen To Use: Use for reading files"
+        );
     }
 
     #[test]
     fn test_multiple_intents_appended() {
         let mut metadata = HashMap::new();
         metadata.insert("x-when-to-use".to_string(), "Use for reads".to_string());
-        metadata.insert("x-common-mistakes".to_string(), "Forgetting the path".to_string());
+        metadata.insert(
+            "x-common-mistakes".to_string(),
+            "Forgetting the path".to_string(),
+        );
         let result = enrich_description("Base", Some(&metadata));
         assert!(result.contains("When To Use: Use for reads"));
         assert!(result.contains("Common Mistakes: Forgetting the path"));
@@ -646,12 +657,24 @@ mod tests {
         let factory = make_factory();
         let desc = make_descriptor("files.read", ModuleAnnotations::default());
         let mut metadata = HashMap::new();
-        metadata.insert("x-when-to-use".to_string(), "Use for reading files".to_string());
-        metadata.insert("x-common-mistakes".to_string(), "Forgetting the path".to_string());
-        let tool = factory.build_tool(&desc, "Read files", Some(&metadata)).unwrap();
+        metadata.insert(
+            "x-when-to-use".to_string(),
+            "Use for reading files".to_string(),
+        );
+        metadata.insert(
+            "x-common-mistakes".to_string(),
+            "Forgetting the path".to_string(),
+        );
+        let tool = factory
+            .build_tool(&desc, "Read files", Some(&metadata))
+            .unwrap();
         assert!(tool.description.starts_with("Read files\n\n"));
-        assert!(tool.description.contains("When To Use: Use for reading files"));
-        assert!(tool.description.contains("Common Mistakes: Forgetting the path"));
+        assert!(tool
+            .description
+            .contains("When To Use: Use for reading files"));
+        assert!(tool
+            .description
+            .contains("Common Mistakes: Forgetting the path"));
     }
 
     #[test]
@@ -675,50 +698,60 @@ mod tests {
 
     #[test]
     fn test_readonly_maps_to_read_only_hint() {
-        let mut ann = ModuleAnnotations::default();
-        ann.readonly = true;
+        let ann = ModuleAnnotations {
+            readonly: true,
+            ..Default::default()
+        };
         let result = ToolAnnotationBuilder::build_annotations(Some(&ann));
-        assert_eq!(result.read_only_hint, true);
+        assert!(result.read_only_hint);
     }
 
     #[test]
     fn test_destructive_maps_to_destructive_hint() {
-        let mut ann = ModuleAnnotations::default();
-        ann.destructive = true;
+        let ann = ModuleAnnotations {
+            destructive: true,
+            ..Default::default()
+        };
         let result = ToolAnnotationBuilder::build_annotations(Some(&ann));
-        assert_eq!(result.destructive_hint, true);
+        assert!(result.destructive_hint);
     }
 
     #[test]
     fn test_idempotent_maps_to_idempotent_hint() {
-        let mut ann = ModuleAnnotations::default();
-        ann.idempotent = true;
+        let ann = ModuleAnnotations {
+            idempotent: true,
+            ..Default::default()
+        };
         let result = ToolAnnotationBuilder::build_annotations(Some(&ann));
-        assert_eq!(result.idempotent_hint, true);
+        assert!(result.idempotent_hint);
     }
 
     #[test]
     fn test_open_world_maps_to_open_world_hint() {
-        let mut ann = ModuleAnnotations::default();
-        ann.open_world = false;
+        let ann = ModuleAnnotations {
+            open_world: false,
+            ..Default::default()
+        };
         let result = ToolAnnotationBuilder::build_annotations(Some(&ann));
-        assert_eq!(result.open_world_hint, false);
+        assert!(!result.open_world_hint);
     }
 
     #[test]
     fn test_default_annotations_mapping() {
         let ann = ModuleAnnotations::default();
         let result = ToolAnnotationBuilder::build_annotations(Some(&ann));
-        assert_eq!(result.read_only_hint, false);
-        assert_eq!(result.destructive_hint, false);
-        assert_eq!(result.idempotent_hint, false);
-        assert_eq!(result.open_world_hint, true);
+        assert!(!result.read_only_hint);
+        assert!(!result.destructive_hint);
+        assert!(!result.idempotent_hint);
+        assert!(result.open_world_hint);
     }
 
     #[test]
     fn test_has_requires_approval_true() {
-        let mut ann = ModuleAnnotations::default();
-        ann.requires_approval = true;
+        let ann = ModuleAnnotations {
+            requires_approval: true,
+            ..Default::default()
+        };
         let meta = ToolAnnotationBuilder::build_meta(Some(&ann));
         assert!(meta.requires_approval);
     }
@@ -732,8 +765,10 @@ mod tests {
 
     #[test]
     fn test_streaming_flag() {
-        let mut ann = ModuleAnnotations::default();
-        ann.streaming = true;
+        let ann = ModuleAnnotations {
+            streaming: true,
+            ..Default::default()
+        };
         assert!(ToolAnnotationBuilder::is_streaming(Some(&ann)));
         let meta = ToolAnnotationBuilder::build_meta(Some(&ann));
         assert!(meta.streaming);
@@ -757,14 +792,19 @@ mod tests {
         let ann = ModuleAnnotations::default();
         let meta = ToolAnnotationBuilder::build_meta_value(Some(&ann));
         let obj = meta.as_object().unwrap();
-        assert!(obj.is_empty(), "default annotations should produce empty _meta");
+        assert!(
+            obj.is_empty(),
+            "default annotations should produce empty _meta"
+        );
     }
 
     #[test]
     fn test_build_meta_value_with_approval_and_streaming() {
-        let mut ann = ModuleAnnotations::default();
-        ann.requires_approval = true;
-        ann.streaming = true;
+        let ann = ModuleAnnotations {
+            requires_approval: true,
+            streaming: true,
+            ..Default::default()
+        };
         let meta = ToolAnnotationBuilder::build_meta_value(Some(&ann));
         let obj = meta.as_object().unwrap();
         assert_eq!(obj.get("requiresApproval"), Some(&Value::Bool(true)));
@@ -799,7 +839,11 @@ mod tests {
         let registry = make_registry_with_modules(vec![
             ("mod.a", "Module A", vec!["search".to_string()]),
             ("mod.b", "Module B", vec!["io".to_string()]),
-            ("mod.c", "Module C", vec!["search".to_string(), "io".to_string()]),
+            (
+                "mod.c",
+                "Module C",
+                vec!["search".to_string(), "io".to_string()],
+            ),
         ]);
 
         let tools = factory.build_tools(&registry, Some(&["search"]), None);
@@ -838,7 +882,11 @@ mod tests {
         let factory = make_factory();
         let registry = make_registry_with_modules(vec![
             ("files.read", "Read files", vec!["io".to_string()]),
-            ("files.write", "Write files", vec!["io".to_string(), "mutation".to_string()]),
+            (
+                "files.write",
+                "Write files",
+                vec!["io".to_string(), "mutation".to_string()],
+            ),
             ("search.query", "Search", vec!["io".to_string()]),
         ]);
 
@@ -852,9 +900,8 @@ mod tests {
     #[test]
     fn test_build_tools_descriptions_from_registry() {
         let factory = make_factory();
-        let registry = make_registry_with_modules(vec![
-            ("mod.a", "Custom description for A", vec![]),
-        ]);
+        let registry =
+            make_registry_with_modules(vec![("mod.a", "Custom description for A", vec![])]);
 
         let tools = factory.build_tools(&registry, None, None);
         assert_eq!(tools.len(), 1);
@@ -930,9 +977,8 @@ mod tests {
     fn test_read_resource_returns_documentation() {
         let factory = make_factory();
         let mut server = factory.create_server("test", "1.0.0");
-        let registry = make_registry_with_modules(vec![
-            ("mod.a", "Module A documentation text", vec![]),
-        ]);
+        let registry =
+            make_registry_with_modules(vec![("mod.a", "Module A documentation text", vec![])]);
 
         factory.register_resource_handlers(&mut server, &registry);
 
@@ -947,13 +993,13 @@ mod tests {
     fn test_read_resource_unknown_uri_errors() {
         let factory = make_factory();
         let mut server = factory.create_server("test", "1.0.0");
-        let registry = make_registry_with_modules(vec![
-            ("mod.a", "Module A docs", vec![]),
-        ]);
+        let registry = make_registry_with_modules(vec![("mod.a", "Module A docs", vec![])]);
 
         factory.register_resource_handlers(&mut server, &registry);
 
-        let result = server.read_resource("docs://nonexistent".to_string()).unwrap();
+        let result = server
+            .read_resource("docs://nonexistent".to_string())
+            .unwrap();
         assert!(result.is_err());
     }
 
@@ -961,9 +1007,7 @@ mod tests {
     fn test_read_resource_wrong_scheme_errors() {
         let factory = make_factory();
         let mut server = factory.create_server("test", "1.0.0");
-        let registry = make_registry_with_modules(vec![
-            ("mod.a", "Module A docs", vec![]),
-        ]);
+        let registry = make_registry_with_modules(vec![("mod.a", "Module A docs", vec![])]);
 
         factory.register_resource_handlers(&mut server, &registry);
 
@@ -977,9 +1021,7 @@ mod tests {
         let mut server = factory.create_server("test", "1.0.0");
         assert!(!server.has_resource_handlers());
 
-        let registry = make_registry_with_modules(vec![
-            ("mod.a", "Module A docs", vec![]),
-        ]);
+        let registry = make_registry_with_modules(vec![("mod.a", "Module A docs", vec![])]);
         factory.register_resource_handlers(&mut server, &registry);
         assert!(server.has_resource_handlers());
     }
@@ -1027,9 +1069,7 @@ mod tests {
     fn test_init_options_resources_capability_when_handlers_registered() {
         let factory = make_factory();
         let mut server = factory.create_server("test", "1.0.0");
-        let registry = make_registry_with_modules(vec![
-            ("mod.a", "Module A docs", vec![]),
-        ]);
+        let registry = make_registry_with_modules(vec![("mod.a", "Module A docs", vec![])]);
         factory.register_resource_handlers(&mut server, &registry);
 
         let opts = factory.build_init_options(&server, "test", "1.0.0");
@@ -1071,7 +1111,11 @@ mod tests {
 
         // Build tools from registry
         let registry = make_registry_with_modules(vec![
-            ("mod.alpha", "Alpha module with docs", vec!["core".to_string()]),
+            (
+                "mod.alpha",
+                "Alpha module with docs",
+                vec!["core".to_string()],
+            ),
             ("mod.beta", "Beta module", vec!["io".to_string()]),
         ]);
 
@@ -1107,9 +1151,11 @@ mod tests {
     fn test_end_to_end_resource_read() {
         let factory = make_factory();
         let mut server = factory.create_server("test", "1.0.0");
-        let registry = make_registry_with_modules(vec![
-            ("doc.module", "This is the documentation for doc.module", vec![]),
-        ]);
+        let registry = make_registry_with_modules(vec![(
+            "doc.module",
+            "This is the documentation for doc.module",
+            vec![],
+        )]);
 
         factory.register_resource_handlers(&mut server, &registry);
 
@@ -1119,6 +1165,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].content, "This is the documentation for doc.module");
+        assert_eq!(
+            result[0].content,
+            "This is the documentation for doc.module"
+        );
     }
 }

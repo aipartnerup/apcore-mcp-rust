@@ -8,9 +8,9 @@ pub mod middleware;
 pub mod protocol;
 
 // ---- Re-exports: public API surface -----------------------------------------
-pub use protocol::{Authenticator, Identity};
 pub use jwt::{ClaimMapping, JWTAuthenticator};
-pub use middleware::{AuthMiddlewareLayer, AuthMiddlewareService, AUTH_IDENTITY, extract_headers};
+pub use middleware::{extract_headers, AuthMiddlewareLayer, AuthMiddlewareService, AUTH_IDENTITY};
+pub use protocol::{Authenticator, Identity};
 
 #[cfg(test)]
 mod integration_tests {
@@ -55,7 +55,13 @@ mod integration_tests {
         require_auth: bool,
     ) -> impl Service<Request<Body>, Response = Response<Body>, Error = Infallible> + Clone {
         let authenticator: Arc<dyn Authenticator> = Arc::new(JWTAuthenticator::new(
-            SECRET, None, None, None, None, None, Some(require_auth),
+            SECRET,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(require_auth),
         ));
         ServiceBuilder::new()
             .layer(AuthMiddlewareLayer::new(authenticator).require_auth(require_auth))
@@ -79,7 +85,9 @@ mod integration_tests {
         let resp = svc.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["id"], "alice");
         assert_eq!(json["type"], "human");
@@ -90,14 +98,14 @@ mod integration_tests {
     async fn full_flow_no_token_returns_401() {
         let svc = build_stack(true);
 
-        let req = Request::get("/api/whoami")
-            .body(Body::empty())
-            .unwrap();
+        let req = Request::get("/api/whoami").body(Body::empty()).unwrap();
 
         let resp = svc.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"], "Unauthorized");
     }
@@ -106,14 +114,14 @@ mod integration_tests {
     async fn full_flow_exempt_health() {
         let svc = build_stack(true);
 
-        let req = Request::get("/health")
-            .body(Body::empty())
-            .unwrap();
+        let req = Request::get("/health").body(Body::empty()).unwrap();
 
         let resp = svc.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["anonymous"], true);
     }
@@ -122,14 +130,14 @@ mod integration_tests {
     async fn full_flow_permissive_mode() {
         let svc = build_stack(false);
 
-        let req = Request::get("/api/whoami")
-            .body(Body::empty())
-            .unwrap();
+        let req = Request::get("/api/whoami").body(Body::empty()).unwrap();
 
         let resp = svc.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["anonymous"], true);
     }
@@ -150,7 +158,13 @@ mod integration_tests {
     #[tokio::test]
     async fn full_flow_custom_exempt_paths() {
         let authenticator: Arc<dyn Authenticator> = Arc::new(JWTAuthenticator::new(
-            SECRET, None, None, None, None, None, Some(true),
+            SECRET,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(true),
         ));
         let layer = AuthMiddlewareLayer::new(authenticator)
             .exempt_paths(HashSet::from(["/status".to_string()]));

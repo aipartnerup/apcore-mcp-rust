@@ -5,39 +5,43 @@
 //! This crate provides the bridge layer that translates apcore module
 //! registries and executors into MCP-compatible tool servers.
 
-pub mod server;
-pub mod auth;
 pub mod adapters;
+pub mod apcore_mcp;
+pub mod auth;
+pub mod cli;
+pub mod constants;
 pub mod converters;
 pub mod explorer;
-pub mod constants;
 pub mod helpers;
-pub mod apcore_mcp;
-pub mod cli;
+pub mod server;
 mod utils;
 
 /// Crate version, kept in sync with Cargo.toml.
 pub const VERSION: &str = "0.10.0";
 
 // ---- Re-exports: core bridge ------------------------------------------------
-pub use crate::apcore_mcp::{APCoreMCP, APCoreMCPBuilder, APCoreMCPConfig, APCoreMCPError, BackendSource};
-pub use crate::apcore_mcp::{ServeOptions, AsyncServeOptions};
-pub use crate::apcore_mcp::{ServeConfig, AsyncServeConfig, OpenAIToolsConfig};
+pub use crate::apcore_mcp::{
+    APCoreMCP, APCoreMCPBuilder, APCoreMCPConfig, APCoreMCPError, BackendSource,
+};
+pub use crate::apcore_mcp::{AsyncServeConfig, OpenAIToolsConfig, ServeConfig};
+pub use crate::apcore_mcp::{AsyncServeOptions, ServeOptions};
 
 // ---- Re-exports: top-level convenience functions ----------------------------
-pub use crate::apcore_mcp::{serve, async_serve, to_openai_tools};
+pub use crate::apcore_mcp::{async_serve, serve, to_openai_tools};
 
 // ---- Re-exports: auth -------------------------------------------------------
+pub use crate::auth::jwt::{ClaimMapping, JWTAuthenticator};
+pub use crate::auth::middleware::{
+    extract_headers, AuthMiddlewareLayer, AuthMiddlewareService, AUTH_IDENTITY,
+};
 pub use crate::auth::protocol::Authenticator;
-pub use crate::auth::jwt::{JWTAuthenticator, ClaimMapping};
-pub use crate::auth::middleware::{AuthMiddlewareLayer, AuthMiddlewareService, AUTH_IDENTITY, extract_headers};
 
 // ---- Re-exports: server -----------------------------------------------------
-pub use crate::server::server::{MCPServer, MCPServerConfig, TransportKind, RegistryOrExecutor};
 pub use crate::server::factory::MCPServerFactory;
-pub use crate::server::router::ExecutionRouter;
-pub use crate::server::transport::TransportManager;
 pub use crate::server::listener::RegistryListener;
+pub use crate::server::router::ExecutionRouter;
+pub use crate::server::server::{MCPServer, MCPServerConfig, RegistryOrExecutor, TransportKind};
+pub use crate::server::transport::TransportManager;
 
 // ---- Re-exports: adapters ---------------------------------------------------
 pub use crate::adapters::AdapterError;
@@ -51,4 +55,4 @@ pub use crate::adapters::SchemaConverter;
 pub use crate::converters::openai::{ConverterError, OpenAIConverter};
 
 // ---- Re-exports: helpers ----------------------------------------------------
-pub use crate::helpers::{report_progress, elicit, ElicitResult};
+pub use crate::helpers::{elicit, report_progress, ElicitResult};

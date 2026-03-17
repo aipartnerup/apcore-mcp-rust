@@ -69,10 +69,7 @@ mod tests {
 
         #[async_trait]
         impl Authenticator for NoOpAuth {
-            async fn authenticate(
-                &self,
-                _headers: &HashMap<String, String>,
-            ) -> Option<Identity> {
+            async fn authenticate(&self, _headers: &HashMap<String, String>) -> Option<Identity> {
                 None
             }
         }

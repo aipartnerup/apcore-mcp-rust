@@ -197,9 +197,18 @@ pub struct APCoreMCP {
     config: APCoreMCPConfig,
     registry: Arc<Registry>,
     executor: Arc<Executor>,
+    // TODO: Wire into ExplorerConfig and AuthMiddlewareLayer when explorer
+    // integration is added to serve()/async_serve().
+    #[allow(dead_code)]
     authenticator: Option<Arc<dyn Authenticator>>,
     metrics_collector: Option<Arc<dyn MetricsExporter>>,
+    // TODO: Pass to ExecutionRouter::new_with_formatter once a real executor
+    // is wired (requires converting to Arc<dyn Fn> or taking &mut self).
+    #[allow(dead_code)]
     output_formatter: Option<OutputFormatter>,
+    // TODO: Pass to resolve_executor once the executor pipeline supports
+    // injecting approval handlers post-construction.
+    #[allow(dead_code)]
     approval_handler: Option<Arc<dyn ApprovalHandler>>,
 }
 
@@ -224,9 +233,11 @@ impl APCoreMCP {
     /// Returns the currently registered tool names (module IDs), filtered
     /// by the configured tags and prefix.
     pub fn tools(&self) -> Vec<String> {
-        let tags_refs: Option<Vec<&str>> = self.config.tags.as_ref().map(|t| {
-            t.iter().map(|s| s.as_str()).collect()
-        });
+        let tags_refs: Option<Vec<&str>> = self
+            .config
+            .tags
+            .as_ref()
+            .map(|t| t.iter().map(|s| s.as_str()).collect());
         let tags_slice: Option<&[&str]> = tags_refs.as_deref();
         let prefix = self.config.prefix.as_deref();
         self.registry
@@ -241,9 +252,19 @@ impl APCoreMCP {
     /// Build the shared MCP server components used by `serve()` and `async_serve()`.
     ///
     /// Returns `(MCPServer, ExecutionRouter, Vec<Tool>, InitializationOptions, version)`.
+    #[allow(clippy::type_complexity)]
     pub(crate) fn build_server_components(
         &self,
-    ) -> Result<(MCPServer, Arc<ExecutionRouter>, Vec<Tool>, InitializationOptions, String), APCoreMCPError> {
+    ) -> Result<
+        (
+            MCPServer,
+            Arc<ExecutionRouter>,
+            Vec<Tool>,
+            InitializationOptions,
+            String,
+        ),
+        APCoreMCPError,
+    > {
         let version = self
             .config
             .version
@@ -254,15 +275,22 @@ impl APCoreMCP {
         let mut server = factory.create_server(&self.config.name, &version);
 
         // Build filtered tool definitions
-        let tags_refs: Option<Vec<&str>> = self.config.tags.as_ref().map(|t| {
-            t.iter().map(|s| s.as_str()).collect()
-        });
+        let tags_refs: Option<Vec<&str>> = self
+            .config
+            .tags
+            .as_ref()
+            .map(|t| t.iter().map(|s| s.as_str()).collect());
         let tags_slice: Option<&[&str]> = tags_refs.as_deref();
         let prefix = self.config.prefix.as_deref();
         let tools = factory.build_tools(&self.registry, tags_slice, prefix);
 
-        // Create execution router (stub for now since we don't have the adapter wired)
-        let router = Arc::new(ExecutionRouter::stub());
+        // Create execution router (stub for now since the adapter layer is not
+        // yet wired). Once a real executor is available, output_formatter and
+        // validate_inputs should be passed via ExecutionRouter::new_with_formatter.
+        let router = Arc::new(ExecutionRouter::new_with_formatter(
+            self.config.validate_inputs,
+            None,
+        ));
 
         // Register handlers
         factory.register_handlers(&mut server, tools.clone(), Arc::clone(&router));
@@ -296,7 +324,9 @@ impl APCoreMCP {
 
         let transport = self.config.transport.to_lowercase();
         if !["stdio", "streamable-http", "sse"].contains(&transport.as_str()) {
-            return Err(APCoreMCPError::UnknownTransport(self.config.transport.clone()));
+            return Err(APCoreMCPError::UnknownTransport(
+                self.config.transport.clone(),
+            ));
         }
 
         let (mut server, _router, tools, _init_options, version) =
@@ -310,9 +340,7 @@ impl APCoreMCP {
             transport,
         );
 
-        let mut transport_manager = TransportManager::new(
-            self.metrics_collector.clone(),
-        );
+        let mut transport_manager = TransportManager::new(self.metrics_collector.clone());
         transport_manager.set_module_count(tools.len());
 
         if let Some(ref on_startup) = opts.on_startup {
@@ -322,8 +350,14 @@ impl APCoreMCP {
         let result = tokio::runtime::Runtime::new()
             .map_err(|e| APCoreMCPError::ServerError(e.to_string()))?
             .block_on(async {
-                server.start().await.map_err(|e| APCoreMCPError::ServerError(e.to_string()))?;
-                server.wait().await.map_err(|e| APCoreMCPError::ServerError(e.to_string()))?;
+                server
+                    .start()
+                    .await
+                    .map_err(|e| APCoreMCPError::ServerError(e.to_string()))?;
+                server
+                    .wait()
+                    .await
+                    .map_err(|e| APCoreMCPError::ServerError(e.to_string()))?;
                 Ok(())
             });
 
@@ -339,10 +373,7 @@ impl APCoreMCP {
     /// This is the async equivalent of [`serve`](Self::serve), but instead of
     /// blocking it returns the built router so callers can mount it in their own
     /// server infrastructure.
-    pub async fn async_serve(
-        &self,
-        opts: AsyncServeOptions,
-    ) -> Result<Router, APCoreMCPError> {
+    pub async fn async_serve(&self, opts: AsyncServeOptions) -> Result<Router, APCoreMCPError> {
         // Validate explorer prefix
         if opts.explorer && !opts.explorer_prefix.starts_with('/') {
             return Err(APCoreMCPError::InvalidExplorerPrefix);
@@ -359,9 +390,7 @@ impl APCoreMCP {
         );
 
         // Build the transport manager
-        let mut transport_manager = TransportManager::new(
-            self.metrics_collector.clone(),
-        );
+        let mut transport_manager = TransportManager::new(self.metrics_collector.clone());
         transport_manager.set_module_count(tools.len());
         let transport_manager = Arc::new(transport_manager);
 
@@ -395,9 +424,11 @@ impl APCoreMCP {
         // Build a JSON registry object from our Registry
         let registry_json = self.build_registry_json();
 
-        let tags_refs: Option<Vec<&str>> = self.config.tags.as_ref().map(|t| {
-            t.iter().map(|s| s.as_str()).collect()
-        });
+        let tags_refs: Option<Vec<&str>> = self
+            .config
+            .tags
+            .as_ref()
+            .map(|t| t.iter().map(|s| s.as_str()).collect());
         let tags_slice: Option<&[&str]> = tags_refs.as_deref();
         let prefix = self.config.prefix.as_deref();
 
@@ -423,9 +454,11 @@ impl APCoreMCP {
         for module_id in module_ids {
             if let Some(descriptor) = self.registry.get_definition(module_id) {
                 let description = self.registry.describe(module_id);
-                let annotations_json = serde_json::to_value(&descriptor.annotations)
-                    .unwrap_or(Value::Null);
-                let tags_json: Vec<Value> = descriptor.tags.iter()
+                let annotations_json =
+                    serde_json::to_value(&descriptor.annotations).unwrap_or(Value::Null);
+                let tags_json: Vec<Value> = descriptor
+                    .tags
+                    .iter()
                     .map(|t| Value::String(t.clone()))
                     .collect();
 
@@ -493,6 +526,7 @@ impl Default for AsyncServeOptions {
 // ---- APCoreMCPBuilder -------------------------------------------------------
 
 /// Builder for [`APCoreMCP`].
+#[derive(Default)]
 pub struct APCoreMCPBuilder {
     pub config: APCoreMCPConfig,
     backend: Option<BackendSource>,
@@ -500,19 +534,6 @@ pub struct APCoreMCPBuilder {
     metrics_collector: Option<Arc<dyn MetricsExporter>>,
     output_formatter: Option<OutputFormatter>,
     approval_handler: Option<Arc<dyn ApprovalHandler>>,
-}
-
-impl Default for APCoreMCPBuilder {
-    fn default() -> Self {
-        Self {
-            config: APCoreMCPConfig::default(),
-            backend: None,
-            authenticator: None,
-            metrics_collector: None,
-            output_formatter: None,
-            approval_handler: None,
-        }
-    }
 }
 
 impl APCoreMCPBuilder {
@@ -667,6 +688,8 @@ impl APCoreMCPBuilder {
         })?;
 
         let registry = utils::resolve_registry(&backend)?;
+        // TODO: Pass approval_handler to resolve_executor once the executor
+        // pipeline supports injecting it post-construction.
         let executor = utils::resolve_executor(&backend, None)?;
 
         Ok(APCoreMCP {
@@ -753,7 +776,7 @@ impl Default for AsyncServeConfig {
 }
 
 /// Configuration for the convenience [`to_openai_tools`] function.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct OpenAIToolsConfig {
     /// Embed annotation metadata in tool descriptions.
     pub embed_annotations: bool,
@@ -765,25 +788,11 @@ pub struct OpenAIToolsConfig {
     pub prefix: Option<String>,
 }
 
-impl Default for OpenAIToolsConfig {
-    fn default() -> Self {
-        Self {
-            embed_annotations: false,
-            strict: false,
-            tags: None,
-            prefix: None,
-        }
-    }
-}
-
 /// Convenience: build and serve in one call (blocking).
 ///
 /// Constructs an [`APCoreMCP`] internally from the given backend source
 /// and config, then calls [`APCoreMCP::serve`].
-pub fn serve(
-    backend: impl Into<BackendSource>,
-    config: ServeConfig,
-) -> Result<(), APCoreMCPError> {
+pub fn serve(backend: impl Into<BackendSource>, config: ServeConfig) -> Result<(), APCoreMCPError> {
     let mut builder = APCoreMCP::builder()
         .backend(backend)
         .name(&config.name)
@@ -847,8 +856,7 @@ pub fn to_openai_tools(
     backend: impl Into<BackendSource>,
     config: OpenAIToolsConfig,
 ) -> Result<Vec<Value>, APCoreMCPError> {
-    let mut builder = APCoreMCP::builder()
-        .backend(backend);
+    let mut builder = APCoreMCP::builder().backend(backend);
 
     if let Some(tags) = config.tags {
         builder = builder.tags(tags);
@@ -883,7 +891,9 @@ mod tests {
 
     impl MockModule {
         fn new(desc: &str) -> Self {
-            Self { desc: desc.to_string() }
+            Self {
+                desc: desc.to_string(),
+            }
         }
     }
 
@@ -908,9 +918,7 @@ mod tests {
     }
 
     /// Create a test registry with the given modules.
-    fn make_test_registry(
-        modules: Vec<(&str, &str, Vec<String>)>,
-    ) -> Registry {
+    fn make_test_registry(modules: Vec<(&str, &str, Vec<String>)>) -> Registry {
         let mut registry = Registry::new();
         for (name, desc, tags) in modules {
             let module = Box::new(MockModule::new(desc));
@@ -923,7 +931,9 @@ mod tests {
                 tags,
                 dependencies: vec![],
             };
-            registry.register_internal(name, module, descriptor).unwrap();
+            registry
+                .register_internal(name, module, descriptor)
+                .unwrap();
         }
         registry
     }
@@ -966,7 +976,11 @@ mod tests {
         let registry = Arc::new(make_test_registry(vec![
             ("mod.public", "Public module", vec!["public".to_string()]),
             ("mod.private", "Private module", vec!["private".to_string()]),
-            ("mod.both", "Both module", vec!["public".to_string(), "private".to_string()]),
+            (
+                "mod.both",
+                "Both module",
+                vec!["public".to_string(), "private".to_string()],
+            ),
         ]));
         let executor = Arc::new(Executor::new(Registry::new(), Config::default()));
         APCoreMCP {
@@ -1175,20 +1189,14 @@ mod tests {
 
     #[test]
     fn builder_rejects_empty_name() {
-        let result = APCoreMCP::builder()
-            .backend("./ext")
-            .name("")
-            .build();
+        let result = APCoreMCP::builder().backend("./ext").name("").build();
         assert!(matches!(result, Err(APCoreMCPError::EmptyName)));
     }
 
     #[test]
     fn builder_rejects_name_over_255() {
         let long = "a".repeat(256);
-        let result = APCoreMCP::builder()
-            .backend("./ext")
-            .name(&long)
-            .build();
+        let result = APCoreMCP::builder().backend("./ext").name(&long).build();
         assert!(matches!(result, Err(APCoreMCPError::NameTooLong(256))));
     }
 
@@ -1203,10 +1211,7 @@ mod tests {
 
     #[test]
     fn builder_rejects_empty_prefix() {
-        let result = APCoreMCP::builder()
-            .backend("./ext")
-            .prefix("")
-            .build();
+        let result = APCoreMCP::builder().backend("./ext").prefix("").build();
         assert!(matches!(result, Err(APCoreMCPError::EmptyPrefix)));
     }
 

@@ -187,17 +187,14 @@ mod tests {
         for &a in &segments {
             // Single segment
             let id = a.to_string();
-            let rt = ModuleIDNormalizer::denormalize(
-                &ModuleIDNormalizer::normalize(&id).unwrap(),
-            );
+            let rt = ModuleIDNormalizer::denormalize(&ModuleIDNormalizer::normalize(&id).unwrap());
             assert_eq!(rt, id);
 
             // Two segments
             for &b in &segments {
                 let id = format!("{a}.{b}");
-                let rt = ModuleIDNormalizer::denormalize(
-                    &ModuleIDNormalizer::normalize(&id).unwrap(),
-                );
+                let rt =
+                    ModuleIDNormalizer::denormalize(&ModuleIDNormalizer::normalize(&id).unwrap());
                 assert_eq!(rt, id);
             }
         }

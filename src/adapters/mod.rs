@@ -24,10 +24,7 @@ pub enum AdapterError {
 
     /// A module ID did not match the expected pattern.
     #[error("invalid module ID '{id}': must match {pattern}")]
-    InvalidModuleId {
-        id: String,
-        pattern: &'static str,
-    },
+    InvalidModuleId { id: String, pattern: &'static str },
 }
 
 impl AdapterError {
@@ -70,7 +67,10 @@ mod tests {
         };
         let msg = err.to_string();
         assert!(msg.contains("BAD-ID"), "message should contain the ID");
-        assert!(msg.contains(MODULE_ID_PATTERN), "message should contain the pattern");
+        assert!(
+            msg.contains(MODULE_ID_PATTERN),
+            "message should contain the pattern"
+        );
     }
 
     #[test]

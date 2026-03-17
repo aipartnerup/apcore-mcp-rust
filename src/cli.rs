@@ -299,7 +299,10 @@ pub async fn run() -> Result<(), CliError> {
 
     // Build authenticator if a key was resolved.
     let authenticator = jwt_key.map(|key| {
-        tracing::info!("JWT authentication enabled (algorithm={})", args.jwt_algorithm);
+        tracing::info!(
+            "JWT authentication enabled (algorithm={})",
+            args.jwt_algorithm
+        );
         let algorithm = parse_jwt_algorithm(&args.jwt_algorithm);
         crate::auth::jwt::JWTAuthenticator::new(
             &key,
@@ -319,7 +322,9 @@ pub async fn run() -> Result<(), CliError> {
     let approval_handler: Option<Arc<dyn apcore::approval::ApprovalHandler>> = match args.approval {
         ApprovalMode::Elicit => {
             tracing::info!("Approval handler: elicit (MCP elicitation)");
-            Some(Arc::new(crate::adapters::approval::ElicitationApprovalHandler::new(None)))
+            Some(Arc::new(
+                crate::adapters::approval::ElicitationApprovalHandler::new(None),
+            ))
         }
         ApprovalMode::AutoApprove => {
             tracing::info!("Approval handler: auto-approve (dev/testing)");
@@ -333,9 +338,7 @@ pub async fn run() -> Result<(), CliError> {
     };
 
     // Resolve server version.
-    let version = args
-        .version
-        .unwrap_or_else(|| crate::VERSION.to_string());
+    let version = args.version.unwrap_or_else(|| crate::VERSION.to_string());
 
     // Build APCoreMCP via builder pattern.
     let mut builder = crate::APCoreMCPBuilder::default()
@@ -681,13 +684,7 @@ mod tests {
 
     #[test]
     fn cli_args_port_zero_rejected() {
-        let result = parse_args(&[
-            "apcore-mcp",
-            "--extensions-dir",
-            "/tmp/ext",
-            "--port",
-            "0",
-        ]);
+        let result = parse_args(&["apcore-mcp", "--extensions-dir", "/tmp/ext", "--port", "0"]);
         assert!(result.is_err());
     }
 
@@ -735,12 +732,8 @@ mod tests {
     #[test]
     fn validate_args_file_as_extensions_dir() {
         let f = NamedTempFile::new().unwrap();
-        let args = parse_args(&[
-            "apcore-mcp",
-            "--extensions-dir",
-            f.path().to_str().unwrap(),
-        ])
-        .unwrap();
+        let args =
+            parse_args(&["apcore-mcp", "--extensions-dir", f.path().to_str().unwrap()]).unwrap();
         let err = validate_args(&args).unwrap_err();
         assert_eq!(err.exit_code(), 1);
         assert!(err.to_string().contains("not a directory"));
@@ -828,24 +821,18 @@ mod tests {
     fn resolve_jwt_key_env_and_none() {
         // First: with JWT_SECRET set, resolve_jwt_key returns it.
         // Safety: test-only env var manipulation.
-        unsafe { std::env::set_var("JWT_SECRET", "env-secret"); }
-        let args = parse_args(&[
-            "apcore-mcp",
-            "--extensions-dir",
-            "/tmp",
-        ])
-        .unwrap();
+        unsafe {
+            std::env::set_var("JWT_SECRET", "env-secret");
+        }
+        let args = parse_args(&["apcore-mcp", "--extensions-dir", "/tmp"]).unwrap();
         let key = resolve_jwt_key(&args).unwrap();
         assert_eq!(key.as_deref(), Some("env-secret"));
 
         // Second: without JWT_SECRET, resolve_jwt_key returns None.
-        unsafe { std::env::remove_var("JWT_SECRET"); }
-        let args2 = parse_args(&[
-            "apcore-mcp",
-            "--extensions-dir",
-            "/tmp",
-        ])
-        .unwrap();
+        unsafe {
+            std::env::remove_var("JWT_SECRET");
+        }
+        let args2 = parse_args(&["apcore-mcp", "--extensions-dir", "/tmp"]).unwrap();
         let key2 = resolve_jwt_key(&args2).unwrap();
         assert!(key2.is_none());
     }
@@ -897,7 +884,10 @@ mod tests {
     #[test]
     fn transport_to_str_mappings() {
         assert_eq!(transport_to_str(&Transport::Stdio), "stdio");
-        assert_eq!(transport_to_str(&Transport::StreamableHttp), "streamable-http");
+        assert_eq!(
+            transport_to_str(&Transport::StreamableHttp),
+            "streamable-http"
+        );
         assert_eq!(transport_to_str(&Transport::Sse), "sse");
     }
 

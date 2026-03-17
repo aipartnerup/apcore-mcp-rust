@@ -1,17 +1,20 @@
-//! Explorer mount — creates an axum router for browsing and introspecting
+//! Explorer mount — creates an Axum router for browsing and introspecting
 //! the registered MCP tools.
+//!
+//! Delegates to `mcp-embedded-ui` for HTML rendering and HTTP handlers.
+//! Bridges apcore's `Authenticator` and `AUTH_IDENTITY` task-local into the
+//! shared UI library.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use axum::http::header;
-use axum::routing::{get, post};
+use async_trait::async_trait;
 use axum::Router;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::Authenticator;
-use crate::explorer::api::{self, ExplorerState};
 
 // ---------------------------------------------------------------------------
 // ToolInfo
@@ -27,6 +30,20 @@ pub struct ToolInfo {
     /// The JSON Schema describing the tool's input parameters.
     #[serde(rename = "inputSchema")]
     pub input_schema: serde_json::Value,
+}
+
+impl mcp_embedded_ui::Tool for ToolInfo {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        self.input_schema.clone()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -136,39 +153,148 @@ impl ExplorerConfig {
     }
 }
 
-/// Create an axum [`Router`] that serves the explorer UI and API.
+// ---------------------------------------------------------------------------
+// Private: bridges between apcore and mcp_embedded_ui types
+// ---------------------------------------------------------------------------
+
+/// Wraps apcore's `Authenticator` to implement `mcp_embedded_ui::Authenticator`.
+///
+/// Converts `apcore::Identity` field-by-field to `mcp_embedded_ui::Identity`.
+struct AuthBridge {
+    inner: Arc<dyn Authenticator>,
+}
+
+#[async_trait]
+impl mcp_embedded_ui::Authenticator for AuthBridge {
+    async fn authenticate(
+        &self,
+        headers: &HashMap<String, String>,
+    ) -> Option<mcp_embedded_ui::Identity> {
+        let id = self.inner.authenticate(headers).await?;
+        Some(mcp_embedded_ui::Identity {
+            id: id.id,
+            identity_type: id.identity_type,
+            roles: id.roles,
+            attrs: id.attrs,
+        })
+    }
+}
+
+/// Wraps an apcore `HandleCallFn` into a `mcp_embedded_ui::ToolCallFn`.
+///
+/// The bridge:
+/// 1. Reads the authenticated identity from `mcp_embedded_ui::AUTH_IDENTITY`
+///    (populated by `mcp-embedded-ui` before invoking the handler).
+/// 2. Converts it back to `apcore::Identity` and scopes it into
+///    `crate::auth::middleware::AUTH_IDENTITY`, so tool handlers work the same
+///    whether the call arrives via MCP or the explorer.
+/// 3. Converts the `Vec<serde_json::Value>` content blocks to
+///    `Vec<mcp_embedded_ui::Content>`.
+fn wrap_call_fn(inner: HandleCallFn) -> mcp_embedded_ui::ToolCallFn {
+    Arc::new(move |name: String, args: serde_json::Value| {
+        let inner = inner.clone();
+        Box::pin(async move {
+            use crate::auth::middleware::AUTH_IDENTITY as APCORE_IDENTITY;
+            use mcp_embedded_ui::AUTH_IDENTITY as UI_IDENTITY;
+
+            // Read identity set by mcp-embedded-ui and convert to apcore::Identity.
+            let apcore_identity =
+                UI_IDENTITY
+                    .try_with(|id| id.clone())
+                    .ok()
+                    .flatten()
+                    .map(|ui_id| apcore::Identity {
+                        id: ui_id.id,
+                        identity_type: ui_id.identity_type,
+                        roles: ui_id.roles,
+                        attrs: ui_id.attrs,
+                    });
+
+            // Run the call handler within apcore's AUTH_IDENTITY scope.
+            let (raw_content, is_error, error_code) = APCORE_IDENTITY
+                .scope(apcore_identity, async move { inner(name, args).await })
+                .await;
+
+            // Convert Vec<serde_json::Value> → Vec<mcp_embedded_ui::Content>.
+            let content = raw_content
+                .into_iter()
+                .map(|v| mcp_embedded_ui::Content {
+                    content_type: v
+                        .get("type")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or_else(|| {
+                            tracing::warn!(
+                                "content block missing 'type' field, defaulting to 'text'"
+                            );
+                            "text"
+                        })
+                        .to_string(),
+                    text: v
+                        .get("text")
+                        .and_then(|t| t.as_str())
+                        .map(|s| s.to_string()),
+                    mime_type: v
+                        .get("mimeType")
+                        .and_then(|t| t.as_str())
+                        .map(|s| s.to_string()),
+                    data: v
+                        .get("data")
+                        .and_then(|t| t.as_str())
+                        .map(|s| s.to_string()),
+                })
+                .collect();
+
+            Ok((content, is_error, error_code))
+        })
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Public factory
+// ---------------------------------------------------------------------------
+
+/// Create an Axum [`Router`] that serves the explorer UI and API.
 ///
 /// The explorer provides:
-/// - A list of all registered tools with their schemas
-/// - A test interface for invoking tools interactively
-/// - JSON API for programmatic access
+/// - A self-contained HTML page for browsing and testing tools
+/// - `GET /tools` — JSON list of all registered tools
+/// - `GET /tools/{name}` — full tool detail including JSON Schema
+/// - `POST /tools/{name}/call` — execute a tool interactively
 pub fn create_explorer_mount(config: ExplorerConfig) -> Router {
-    use crate::explorer::templates::render_html;
+    let prefix = config.explorer_prefix.clone();
 
-    let html = render_html(
-        &config.title,
-        config.project_name.as_deref(),
-        config.project_url.as_deref(),
-        config.allow_execute,
-    );
+    let tools: Vec<Arc<dyn mcp_embedded_ui::Tool>> = config
+        .tools
+        .into_iter()
+        .map(|t| Arc::new(t) as Arc<dyn mcp_embedded_ui::Tool>)
+        .collect();
 
-    let state = ExplorerState {
-        tools: Arc::new(config.tools),
-        handle_call: config.handle_call,
-        allow_execute: config.allow_execute,
-        authenticator: config.authenticator,
+    let handler = match config.handle_call {
+        Some(f) => mcp_embedded_ui::ToolCallHandler::Basic(wrap_call_fn(f)),
+        None => mcp_embedded_ui::ToolCallHandler::Basic(Arc::new(|name, _args| {
+            Box::pin(async move {
+                Err(mcp_embedded_ui::ToolCallError::Internal(format!(
+                    "No call handler configured for tool '{}'",
+                    name
+                )))
+            })
+        })),
     };
 
-    Router::new()
-        .route(
-            "/",
-            get(move || async move {
-                ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html)
-            }),
-        )
-        .route("/tools", get(api::list_tools))
-        .route("/tools/{name}/call", post(api::call_tool))
-        .with_state(state)
+    let mut ui_config = mcp_embedded_ui::UiConfig {
+        allow_execute: config.allow_execute,
+        title: config.title,
+        project_name: config.project_name,
+        project_url: config.project_url,
+        auth_hook: Default::default(),
+        authenticator: None,
+    };
+
+    if let Some(auth) = config.authenticator {
+        ui_config.authenticator = Some(Arc::new(AuthBridge { inner: auth }));
+    }
+
+    mcp_embedded_ui::create_mount(Some(&prefix), Arc::new(tools), handler, ui_config)
 }
 
 // ===========================================================================
@@ -233,7 +359,6 @@ mod tests {
         let serialized = serde_json::to_value(&tool).unwrap();
         assert_eq!(serialized["name"], "add");
         assert_eq!(serialized["description"], "Add two numbers");
-        // Must use camelCase "inputSchema", not snake_case
         assert!(serialized.get("inputSchema").is_some());
         assert!(serialized.get("input_schema").is_none());
     }
@@ -255,7 +380,6 @@ mod tests {
 
     #[test]
     fn handle_call_fn_is_send_sync() {
-        // Compile-time assertion: HandleCallFn must be Send + Sync.
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<HandleCallFn>();
     }
@@ -280,7 +404,8 @@ mod tests {
     fn mock_handle_call() -> HandleCallFn {
         Arc::new(|name: String, args: serde_json::Value| {
             Box::pin(async move {
-                let content = vec![json!({"type": "text", "text": format!("called {} with {}", name, args)})];
+                let content =
+                    vec![json!({"type": "text", "text": format!("called {} with {}", name, args)})];
                 (content, false, None)
             })
         })
@@ -296,18 +421,16 @@ mod tests {
             .title("Test Explorer");
         let app = create_explorer_mount(config);
 
-        let req = Request::get("/").body(Body::empty()).unwrap();
+        let req = Request::get("/explorer").body(Body::empty()).unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 200);
-        assert_eq!(
-            resp.headers().get("content-type").unwrap(),
-            "text/html; charset=utf-8"
-        );
 
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let html = String::from_utf8(body.to_vec()).unwrap();
         assert!(html.contains("<title>Test Explorer</title>"));
-        assert!(html.contains(r#"data-allow-execute="true""#));
+        assert!(html.contains("var executeEnabled = true"));
     }
 
     #[tokio::test]
@@ -317,11 +440,13 @@ mod tests {
             .handle_call(mock_handle_call());
         let app = create_explorer_mount(config);
 
-        let req = Request::get("/tools").body(Body::empty()).unwrap();
+        let req = Request::get("/explorer/tools").body(Body::empty()).unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 200);
 
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let tools: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
         assert_eq!(tools.len(), 2);
     }
@@ -333,17 +458,23 @@ mod tests {
             .handle_call(mock_handle_call());
         let app = create_explorer_mount(config);
 
-        let req = Request::post("/tools/tool_one/call")
+        let req = Request::post("/explorer/tools/tool_one/call")
             .header("content-type", "application/json")
             .body(Body::from(r#"{"arg": "value"}"#))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 200);
 
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(!json["is_error"].as_bool().unwrap());
-        assert!(json["content"][0]["text"].as_str().unwrap().contains("tool_one"));
+        // mcp-embedded-ui serializes as "isError" (camelCase, MCP spec)
+        assert!(!json["isError"].as_bool().unwrap());
+        assert!(json["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("tool_one"));
     }
 
     #[tokio::test]
@@ -353,7 +484,7 @@ mod tests {
             .handle_call(mock_handle_call());
         let app = create_explorer_mount(config);
 
-        let req = Request::post("/tools/nonexistent/call")
+        let req = Request::post("/explorer/tools/nonexistent/call")
             .header("content-type", "application/json")
             .body(Body::from("{}"))
             .unwrap();
@@ -370,16 +501,12 @@ mod tests {
             .handle_call(mock_handle_call());
         let app = create_explorer_mount(config);
 
-        let req = Request::post("/tools/tool_one/call")
+        let req = Request::post("/explorer/tools/tool_one/call")
             .header("content-type", "application/json")
             .body(Body::from("{}"))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 403);
-
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["error"], "Forbidden");
     }
 
     #[tokio::test]
@@ -387,7 +514,7 @@ mod tests {
         let config = ExplorerConfig::new(sample_tools()).allow_execute(false);
         let app = create_explorer_mount(config);
 
-        let req = Request::get("/tools").body(Body::empty()).unwrap();
+        let req = Request::get("/explorer/tools").body(Body::empty()).unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 200);
     }
@@ -396,8 +523,6 @@ mod tests {
 
     #[tokio::test]
     async fn integration_auth_required_no_token_returns_401() {
-        use async_trait::async_trait;
-        use std::collections::HashMap;
         use crate::auth::protocol::Identity;
 
         struct RejectAuth;
@@ -415,7 +540,7 @@ mod tests {
             .authenticator(Arc::new(RejectAuth));
         let app = create_explorer_mount(config);
 
-        let req = Request::post("/tools/tool_one/call")
+        let req = Request::post("/explorer/tools/tool_one/call")
             .header("content-type", "application/json")
             .body(Body::from("{}"))
             .unwrap();
@@ -425,10 +550,8 @@ mod tests {
 
     #[tokio::test]
     async fn integration_auth_with_valid_token_succeeds() {
-        use async_trait::async_trait;
-        use std::collections::HashMap;
-        use crate::auth::protocol::Identity;
         use crate::auth::middleware::AUTH_IDENTITY;
+        use crate::auth::protocol::Identity;
 
         #[derive(Clone)]
         struct AcceptAuth;
@@ -450,12 +573,14 @@ mod tests {
             }
         }
 
-        // handle_call that verifies AUTH_IDENTITY is set
+        // Handler verifies that crate::auth::middleware::AUTH_IDENTITY is set.
         let handle_call: HandleCallFn = Arc::new(|_name, _args| {
             Box::pin(async move {
                 let identity_id = AUTH_IDENTITY
                     .try_with(|id| {
-                        id.as_ref().map(|i| i.id.clone()).unwrap_or_else(|| "none".to_string())
+                        id.as_ref()
+                            .map(|i| i.id.clone())
+                            .unwrap_or_else(|| "none".to_string())
                     })
                     .unwrap_or_else(|_| "no-task-local".to_string());
                 let content = vec![json!({"type": "text", "text": identity_id})];
@@ -469,7 +594,7 @@ mod tests {
             .authenticator(Arc::new(AcceptAuth));
         let app = create_explorer_mount(config);
 
-        let req = Request::post("/tools/tool_one/call")
+        let req = Request::post("/explorer/tools/tool_one/call")
             .header("content-type", "application/json")
             .header("authorization", "Bearer valid")
             .body(Body::from("{}"))
@@ -477,23 +602,98 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 200);
 
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        // Verify AUTH_IDENTITY was bridged during execution
+        // Verify the full auth bridge: apcore AUTH_IDENTITY was populated.
         assert_eq!(json["content"][0]["text"], "authed-user");
     }
 
-    // -- HTML: allow_execute=false has no data attribute -------------------
+    // -- HTML: allow_execute=false has no data attribute ------------------
 
     #[tokio::test]
     async fn integration_html_no_execute_attribute_when_disabled() {
         let config = ExplorerConfig::new(sample_tools()).allow_execute(false);
         let app = create_explorer_mount(config);
 
-        let req = Request::get("/").body(Body::empty()).unwrap();
+        let req = Request::get("/explorer").body(Body::empty()).unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let html = String::from_utf8(body.to_vec()).unwrap();
-        assert!(!html.contains(r#"data-allow-execute="true""#));
+        assert!(!html.contains("var executeEnabled = true"));
+    }
+
+    // -- wrap_call_fn content conversion tests ----------------------------
+
+    #[tokio::test]
+    async fn wrap_call_fn_converts_text_content() {
+        let inner: HandleCallFn = Arc::new(|_name, _args| {
+            Box::pin(async move {
+                let content = vec![json!({"type": "text", "text": "hello world"})];
+                (content, false, None)
+            })
+        });
+        let wrapped = super::wrap_call_fn(inner);
+        let result = wrapped("test".into(), json!({})).await.unwrap();
+        let (content, is_error, error_code) = result;
+        assert!(!is_error);
+        assert!(error_code.is_none());
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0].content_type, "text");
+        assert_eq!(content[0].text.as_deref(), Some("hello world"));
+        assert!(content[0].mime_type.is_none());
+        assert!(content[0].data.is_none());
+    }
+
+    #[tokio::test]
+    async fn wrap_call_fn_converts_image_content() {
+        let inner: HandleCallFn = Arc::new(|_name, _args| {
+            Box::pin(async move {
+                let content =
+                    vec![json!({"type": "image", "mimeType": "image/png", "data": "base64data"})];
+                (content, false, None)
+            })
+        });
+        let wrapped = super::wrap_call_fn(inner);
+        let result = wrapped("test".into(), json!({})).await.unwrap();
+        let (content, _, _) = result;
+        assert_eq!(content[0].content_type, "image");
+        assert_eq!(content[0].mime_type.as_deref(), Some("image/png"));
+        assert_eq!(content[0].data.as_deref(), Some("base64data"));
+        assert!(content[0].text.is_none());
+    }
+
+    #[tokio::test]
+    async fn wrap_call_fn_missing_type_defaults_to_text() {
+        let inner: HandleCallFn = Arc::new(|_name, _args| {
+            Box::pin(async move {
+                let content = vec![json!({"text": "no type field"})];
+                (content, false, None)
+            })
+        });
+        let wrapped = super::wrap_call_fn(inner);
+        let result = wrapped("test".into(), json!({})).await.unwrap();
+        let (content, _, _) = result;
+        assert_eq!(content[0].content_type, "text");
+        assert_eq!(content[0].text.as_deref(), Some("no type field"));
+    }
+
+    #[tokio::test]
+    async fn wrap_call_fn_propagates_error_state() {
+        let inner: HandleCallFn = Arc::new(|_name, _args| {
+            Box::pin(async move {
+                let content = vec![json!({"type": "text", "text": "error details"})];
+                (content, true, Some("ERR_CODE".to_string()))
+            })
+        });
+        let wrapped = super::wrap_call_fn(inner);
+        let result = wrapped("test".into(), json!({})).await.unwrap();
+        let (content, is_error, error_code) = result;
+        assert!(is_error);
+        assert_eq!(error_code.as_deref(), Some("ERR_CODE"));
+        assert_eq!(content[0].text.as_deref(), Some("error details"));
     }
 }

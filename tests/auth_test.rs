@@ -8,5 +8,5 @@ fn placeholder_auth_test() {
     // TODO: Test ClaimMapping customization
     // TODO: Test AuthMiddleware integration with axum
     // TODO: Test AUTH_IDENTITY task-local propagation
-    assert!(true, "auth tests not yet implemented");
+    // auth tests not yet implemented
 }

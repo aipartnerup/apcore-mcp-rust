@@ -106,13 +106,8 @@ impl OpenAIConverter {
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
-            let tool = self.convert_descriptor(
-                module_id,
-                entry,
-                description,
-                embed_annotations,
-                strict,
-            )?;
+            let tool =
+                self.convert_descriptor(module_id, entry, description, embed_annotations, strict)?;
             tools.push(tool);
         }
 
@@ -287,10 +282,7 @@ impl OpenAIConverter {
             && obj.contains_key("properties")
         {
             // Set additionalProperties: false
-            obj.insert(
-                "additionalProperties".to_string(),
-                Value::Bool(false),
-            );
+            obj.insert("additionalProperties".to_string(), Value::Bool(false));
 
             // Collect existing required set
             let existing_required: std::collections::HashSet<String> = obj
@@ -376,8 +368,10 @@ impl OpenAIConverter {
                     Value::String(s) => {
                         // "string" -> ["string", "null"]
                         let original = s.clone();
-                        *type_val =
-                            Value::Array(vec![Value::String(original), Value::String("null".to_string())]);
+                        *type_val = Value::Array(vec![
+                            Value::String(original),
+                            Value::String("null".to_string()),
+                        ]);
                     }
                     Value::Array(arr) => {
                         // ["string", "integer"] -> ["string", "integer", "null"]
@@ -417,7 +411,10 @@ mod tests {
     fn test_converter_error_display_adapter() {
         let adapter_err = AdapterError::SchemaConversion("bad schema".into());
         let err = ConverterError::Adapter(adapter_err);
-        assert_eq!(err.to_string(), "adapter error: schema conversion failed: bad schema");
+        assert_eq!(
+            err.to_string(),
+            "adapter error: schema conversion failed: bad schema"
+        );
     }
 
     #[test]
@@ -631,7 +628,10 @@ mod tests {
             }
         });
         OpenAIConverter::convert_to_strict(&mut node);
-        assert_eq!(node["properties"]["name"]["type"], json!(["string", "null"]));
+        assert_eq!(
+            node["properties"]["name"]["type"],
+            json!(["string", "null"])
+        );
     }
 
     #[test]
@@ -792,9 +792,7 @@ mod tests {
             .get("x-llm-description")
             .is_none());
         assert!(result["properties"]["limit"].get("default").is_none());
-        assert!(result["properties"]["limit"]
-            .get("x-validation")
-            .is_none());
+        assert!(result["properties"]["limit"].get("x-validation").is_none());
         assert!(result["properties"]["config"]["properties"]["verbose"]
             .get("default")
             .is_none());
@@ -969,7 +967,10 @@ mod tests {
             .unwrap();
         assert_eq!(result["function"]["strict"], true);
         // Strict mode should add additionalProperties: false
-        assert_eq!(result["function"]["parameters"]["additionalProperties"], false);
+        assert_eq!(
+            result["function"]["parameters"]["additionalProperties"],
+            false
+        );
     }
 
     #[test]
@@ -1003,7 +1004,10 @@ mod tests {
         // All properties required (sorted)
         assert_eq!(params["required"], json!(["limit", "query"]));
         // limit was optional -> nullable
-        assert_eq!(params["properties"]["limit"]["type"], json!(["integer", "null"]));
+        assert_eq!(
+            params["properties"]["limit"]["type"],
+            json!(["integer", "null"])
+        );
         // default should be stripped
         assert!(params["properties"]["limit"].get("default").is_none());
         // query was required -> stays as-is
@@ -1178,7 +1182,10 @@ mod tests {
         assert_eq!(result.len(), 2);
         // All names should start with "image-"
         for tool in &result {
-            assert!(tool["function"]["name"].as_str().unwrap().starts_with("image-"));
+            assert!(tool["function"]["name"]
+                .as_str()
+                .unwrap()
+                .starts_with("image-"));
         }
     }
 
@@ -1221,7 +1228,10 @@ mod tests {
             .unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0]["function"]["strict"], true);
-        assert_eq!(result[0]["function"]["parameters"]["additionalProperties"], false);
+        assert_eq!(
+            result[0]["function"]["parameters"]["additionalProperties"],
+            false
+        );
     }
 
     #[test]
@@ -1469,7 +1479,11 @@ mod tests {
         assert_eq!(result.len(), 2);
         for tool in &result {
             let name = tool["function"]["name"].as_str().unwrap();
-            assert!(name.starts_with("image-"), "Expected image- prefix, got {}", name);
+            assert!(
+                name.starts_with("image-"),
+                "Expected image- prefix, got {}",
+                name
+            );
         }
 
         let result = converter

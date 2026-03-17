@@ -13,9 +13,18 @@ use strum_macros::{Display, EnumIter, EnumString, IntoStaticStr};
 /// Each variant serializes to its SCREAMING_SNAKE_CASE string form
 /// for wire-format compatibility with other language SDKs.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash,
-    Display, EnumString, EnumIter, IntoStaticStr,
-    Serialize, Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Display,
+    EnumString,
+    EnumIter,
+    IntoStaticStr,
+    Serialize,
+    Deserialize,
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -46,9 +55,7 @@ pub enum ErrorCode {
 /// The wire value is lowercase (`"register"`, `"unregister"`).
 /// Use [`RegistryEvent::key()`] for the uppercase protocol key.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash,
-    Display, EnumString, EnumIter,
-    Serialize, Deserialize,
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, EnumIter, Serialize, Deserialize,
 )]
 #[strum(serialize_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
@@ -123,8 +130,14 @@ mod tests {
     #[test]
     fn error_code_known_values() {
         assert_eq!(ErrorCode::ModuleNotFound.to_string(), "MODULE_NOT_FOUND");
-        assert_eq!(ErrorCode::SchemaValidationError.to_string(), "SCHEMA_VALIDATION_ERROR");
-        assert_eq!(ErrorCode::ExecutionCancelled.to_string(), "EXECUTION_CANCELLED");
+        assert_eq!(
+            ErrorCode::SchemaValidationError.to_string(),
+            "SCHEMA_VALIDATION_ERROR"
+        );
+        assert_eq!(
+            ErrorCode::ExecutionCancelled.to_string(),
+            "EXECUTION_CANCELLED"
+        );
     }
 
     #[test]
@@ -140,8 +153,14 @@ mod tests {
 
     #[test]
     fn registry_event_from_str() {
-        assert_eq!("register".parse::<RegistryEvent>().unwrap(), RegistryEvent::Register);
-        assert_eq!("unregister".parse::<RegistryEvent>().unwrap(), RegistryEvent::Unregister);
+        assert_eq!(
+            "register".parse::<RegistryEvent>().unwrap(),
+            RegistryEvent::Register
+        );
+        assert_eq!(
+            "unregister".parse::<RegistryEvent>().unwrap(),
+            RegistryEvent::Unregister
+        );
     }
 
     #[test]
@@ -242,10 +261,7 @@ mod tests {
     /// Verify MODULE_ID_PATTERN matches the Python regex exactly.
     #[test]
     fn module_id_pattern_matches_python() {
-        assert_eq!(
-            MODULE_ID_PATTERN,
-            r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$"
-        );
+        assert_eq!(MODULE_ID_PATTERN, r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$");
     }
 
     /// ErrorCode JSON output is a plain string, not an object.

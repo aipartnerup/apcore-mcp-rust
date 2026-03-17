@@ -120,9 +120,9 @@ impl SchemaConverter {
 
         let def_name = &ref_path[8..]; // Remove "#/$defs/"
 
-        let defs_map = defs.as_object().ok_or_else(|| {
-            AdapterError::SchemaConversion("$defs must be an object".into())
-        })?;
+        let defs_map = defs
+            .as_object()
+            .ok_or_else(|| AdapterError::SchemaConversion("$defs must be an object".into()))?;
 
         defs_map.get(def_name).cloned().ok_or_else(|| {
             AdapterError::SchemaConversion(format!("Definition not found: {def_name}"))
@@ -201,7 +201,10 @@ mod tests {
         });
         let result = SchemaConverter::convert_input_schema(&schema).unwrap();
         assert_eq!(result["properties"]["step"]["type"], "object");
-        assert_eq!(result["properties"]["step"]["properties"]["id"]["type"], "integer");
+        assert_eq!(
+            result["properties"]["step"]["properties"]["id"]["type"],
+            "integer"
+        );
         assert!(result.get("$defs").is_none());
     }
 
@@ -252,7 +255,10 @@ mod tests {
             }
         });
         let result = SchemaConverter::convert_input_schema(&schema).unwrap();
-        assert_eq!(result["properties"]["config"]["properties"]["enabled"]["type"], "boolean");
+        assert_eq!(
+            result["properties"]["config"]["properties"]["enabled"]["type"],
+            "boolean"
+        );
     }
 
     #[test]
@@ -362,8 +368,14 @@ mod tests {
             }
         });
         let result = SchemaConverter::convert_input_schema(&schema).unwrap();
-        assert_eq!(result["properties"]["a"]["properties"]["val"]["type"], "integer");
-        assert_eq!(result["properties"]["b"]["properties"]["val"]["type"], "integer");
+        assert_eq!(
+            result["properties"]["a"]["properties"]["val"]["type"],
+            "integer"
+        );
+        assert_eq!(
+            result["properties"]["b"]["properties"]["val"]["type"],
+            "integer"
+        );
     }
 
     #[test]
@@ -432,7 +444,10 @@ mod tests {
         let result = SchemaConverter::convert_input_schema(&schema).unwrap();
         assert_eq!(result["type"], "object");
         assert_eq!(result["properties"]["query"]["type"], "string");
-        assert_eq!(result["properties"]["config"]["properties"]["limit"]["type"], "integer");
+        assert_eq!(
+            result["properties"]["config"]["properties"]["limit"]["type"],
+            "integer"
+        );
         assert_eq!(result["required"], json!(["query"]));
         assert!(result.get("$defs").is_none());
     }

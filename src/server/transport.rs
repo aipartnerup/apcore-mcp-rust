@@ -2,7 +2,6 @@
 //!
 //! Also exposes Prometheus metrics for observability.
 
-
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -151,10 +150,7 @@ impl TransportManager {
     /// Run the MCP server over stdio transport (blocks until EOF on stdin).
     ///
     /// Reads line-delimited JSON-RPC from stdin and writes responses to stdout.
-    pub async fn run_stdio(
-        &self,
-        handler: &dyn McpHandler,
-    ) -> Result<(), TransportError> {
+    pub async fn run_stdio(&self, handler: &dyn McpHandler) -> Result<(), TransportError> {
         tracing::info!("Starting stdio transport");
         self.run_stdio_with_io(tokio::io::stdin(), tokio::io::stdout(), handler)
             .await
@@ -239,9 +235,7 @@ impl TransportManager {
             )
             .with_state(mcp_state);
 
-        let mut app = self
-            .health_metrics_router()
-            .nest("/mcp", mcp_router);
+        let mut app = self.health_metrics_router().nest("/mcp", mcp_router);
 
         if let Some(extra) = extra_routes {
             app = app.merge(extra);
@@ -268,7 +262,9 @@ impl TransportManager {
             .parse()
             .map_err(|_| TransportError::InvalidHost(host.to_string()))?;
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        axum::serve(listener, app).await.map_err(TransportError::Io)?;
+        axum::serve(listener, app)
+            .await
+            .map_err(TransportError::Io)?;
         Ok(())
     }
 
@@ -329,7 +325,9 @@ impl TransportManager {
             .parse()
             .map_err(|_| TransportError::InvalidHost(host.to_string()))?;
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        axum::serve(listener, app).await.map_err(TransportError::Io)?;
+        axum::serve(listener, app)
+            .await
+            .map_err(TransportError::Io)?;
         Ok(())
     }
 }
@@ -444,8 +442,9 @@ struct SseState {
 /// and streams responses as SSE events.
 async fn sse_stream_handler(
     axum::extract::State(state): axum::extract::State<SseState>,
-) -> axum::response::sse::Sse<impl tokio_stream::Stream<Item = Result<axum::response::sse::Event, Infallible>>>
-{
+) -> axum::response::sse::Sse<
+    impl tokio_stream::Stream<Item = Result<axum::response::sse::Event, Infallible>>,
+> {
     use axum::response::sse::{Event, Sse};
 
     let handler = state.handler.clone();
@@ -551,7 +550,7 @@ mod tests {
 
     #[test]
     fn transport_error_io_from_conversion() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "boom");
+        let io_err = std::io::Error::other("boom");
         let err: TransportError = io_err.into();
         assert!(matches!(err, TransportError::Io(_)));
     }
@@ -743,7 +742,12 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
 
         assert_eq!(resp.status(), StatusCode::OK);
-        let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert_eq!(ct, "text/plain; version=0.0.4; charset=utf-8");
 
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
@@ -848,8 +852,10 @@ mod tests {
     #[tokio::test]
     async fn stdio_multiple_requests() {
         let input = concat!(
-            r#"{"jsonrpc":"2.0","id":1,"method":"a"}"#, "\n",
-            r#"{"jsonrpc":"2.0","id":2,"method":"b"}"#, "\n",
+            r#"{"jsonrpc":"2.0","id":1,"method":"a"}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":2,"method":"b"}"#,
+            "\n",
         )
         .to_string();
         let reader = std::io::Cursor::new(input.into_bytes());
@@ -1016,10 +1022,7 @@ mod tests {
         let tm = Arc::new(TransportManager::new(None));
         let handler: Arc<dyn McpHandler> = Arc::new(EchoHandler);
 
-        let extra = Router::new().route(
-            "/custom",
-            get(|| async { "custom-response" }),
-        );
+        let extra = Router::new().route("/custom", get(|| async { "custom-response" }));
         let app = tm.build_streamable_http_app(handler, Some(extra));
 
         let req = Request::builder()
@@ -1060,10 +1063,7 @@ mod tests {
         let handler: Arc<dyn McpHandler> = Arc::new(EchoHandler);
         let app = tm.build_streamable_http_app(handler, None);
 
-        let req = Request::builder()
-            .uri("/mcp")
-            .body(Body::empty())
-            .unwrap();
+        let req = Request::builder().uri("/mcp").body(Body::empty()).unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let ct = resp
@@ -1154,10 +1154,7 @@ mod tests {
         #[allow(deprecated)]
         let app = tm.build_sse_app(handler, None);
 
-        let req = Request::builder()
-            .uri("/sse")
-            .body(Body::empty())
-            .unwrap();
+        let req = Request::builder().uri("/sse").body(Body::empty()).unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let ct = resp
@@ -1246,7 +1243,10 @@ mod tests {
     fn validate_host_port_rejects_both_invalid() {
         // Empty host is checked first.
         let result = TransportManager::validate_host_port("", 0);
-        assert!(matches!(result.unwrap_err(), TransportError::InvalidHost(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            TransportError::InvalidHost(_)
+        ));
     }
 
     #[test]
@@ -1297,10 +1297,14 @@ mod tests {
     #[tokio::test]
     async fn stdio_mixed_notifications_and_requests() {
         let input = concat!(
-            r#"{"jsonrpc":"2.0","method":"notify1"}"#, "\n",
-            r#"{"jsonrpc":"2.0","id":1,"method":"req1"}"#, "\n",
-            r#"{"jsonrpc":"2.0","method":"notify2"}"#, "\n",
-            r#"{"jsonrpc":"2.0","id":2,"method":"req2"}"#, "\n",
+            r#"{"jsonrpc":"2.0","method":"notify1"}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":1,"method":"req1"}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","method":"notify2"}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":2,"method":"req2"}"#,
+            "\n",
         )
         .to_string();
         let reader = std::io::Cursor::new(input.into_bytes());
@@ -1346,10 +1350,7 @@ mod tests {
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
-        assert_eq!(
-            String::from_utf8(body.to_vec()).unwrap(),
-            "test_metric 1\n"
-        );
+        assert_eq!(String::from_utf8(body.to_vec()).unwrap(), "test_metric 1\n");
     }
 
     #[tokio::test]

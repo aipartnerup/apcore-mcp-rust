@@ -233,9 +233,7 @@ fn attach_ai_guidance(error: &ModuleError, resp: &mut McpErrorResponse) {
 ///
 /// Extracts the `"errors"` array from details and formats each entry as
 /// `"field: message"`. Returns a fallback if no errors are present.
-fn format_validation_errors(
-    details: &std::collections::HashMap<String, Value>,
-) -> String {
+fn format_validation_errors(details: &std::collections::HashMap<String, Value>) -> String {
     let errors = match details.get("errors") {
         Some(Value::Array(arr)) => arr,
         _ => return "Schema validation failed".to_string(),
@@ -248,10 +246,7 @@ fn format_validation_errors(
     let lines: Vec<String> = errors
         .iter()
         .map(|e| {
-            let field = e
-                .get("field")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
+            let field = e.get("field").and_then(Value::as_str).unwrap_or("unknown");
             let msg = e
                 .get("message")
                 .and_then(Value::as_str)
@@ -294,7 +289,10 @@ mod tests {
 
     #[test]
     fn test_internal_error_sanitized() {
-        let err = make_error(ApcoreErrorCode::CallDepthExceeded, "depth 42 exceeded limit");
+        let err = make_error(
+            ApcoreErrorCode::CallDepthExceeded,
+            "depth 42 exceeded limit",
+        );
         let resp = ErrorMapper::to_mcp_error(&err);
         assert!(resp.is_error);
         assert_eq!(resp.error_type, "CALL_DEPTH_EXCEEDED");
@@ -431,15 +429,9 @@ mod tests {
             "reason".to_string(),
             Value::String("Policy violation".to_string()),
         );
-        details.insert(
-            "module_id".to_string(),
-            Value::String("mod.x".to_string()),
-        );
-        let err = make_error_with_details(
-            ApcoreErrorCode::ApprovalDenied,
-            "Approval denied",
-            details,
-        );
+        details.insert("module_id".to_string(), Value::String("mod.x".to_string()));
+        let err =
+            make_error_with_details(ApcoreErrorCode::ApprovalDenied, "Approval denied", details);
         let resp = ErrorMapper::to_mcp_error(&err);
         assert!(resp.is_error);
         assert_eq!(resp.error_type, "APPROVAL_DENIED");
@@ -460,10 +452,7 @@ mod tests {
             .with_suggestion("Use smaller input");
         let resp = ErrorMapper::to_mcp_error(&err);
         assert_eq!(resp.retryable, Some(true));
-        assert_eq!(
-            resp.ai_guidance.as_deref(),
-            Some("Try reducing batch size")
-        );
+        assert_eq!(resp.ai_guidance.as_deref(), Some("Try reducing batch size"));
         assert_eq!(resp.suggestion.as_deref(), Some("Use smaller input"));
     }
 

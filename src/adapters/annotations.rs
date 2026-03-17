@@ -83,7 +83,10 @@ impl AnnotationMapper {
             parts.push(format!("idempotent={}", annotations.idempotent));
         }
         if annotations.requires_approval != defaults.requires_approval {
-            parts.push(format!("requires_approval={}", annotations.requires_approval));
+            parts.push(format!(
+                "requires_approval={}",
+                annotations.requires_approval
+            ));
         }
         if annotations.open_world != defaults.open_world {
             parts.push(format!("open_world={}", annotations.open_world));
@@ -147,8 +150,10 @@ mod tests {
 
     #[test]
     fn test_to_mcp_annotations_readonly() {
-        let mut ann = ModuleAnnotations::default();
-        ann.readonly = true;
+        let ann = ModuleAnnotations {
+            readonly: true,
+            ..Default::default()
+        };
         let result = AnnotationMapper::to_mcp_annotations(Some(&ann));
         assert!(result.read_only_hint);
         assert!(!result.destructive_hint);
@@ -156,8 +161,10 @@ mod tests {
 
     #[test]
     fn test_to_mcp_annotations_destructive() {
-        let mut ann = ModuleAnnotations::default();
-        ann.destructive = true;
+        let ann = ModuleAnnotations {
+            destructive: true,
+            ..Default::default()
+        };
         let result = AnnotationMapper::to_mcp_annotations(Some(&ann));
         assert!(result.destructive_hint);
         assert!(!result.read_only_hint);
@@ -165,11 +172,13 @@ mod tests {
 
     #[test]
     fn test_to_mcp_annotations_all_set() {
-        let mut ann = ModuleAnnotations::default();
-        ann.readonly = true;
-        ann.destructive = true;
-        ann.idempotent = true;
-        ann.open_world = false;
+        let ann = ModuleAnnotations {
+            readonly: true,
+            destructive: true,
+            idempotent: true,
+            open_world: false,
+            ..Default::default()
+        };
         let result = AnnotationMapper::to_mcp_annotations(Some(&ann));
         assert_eq!(
             result,
@@ -205,8 +214,10 @@ mod tests {
 
     #[test]
     fn test_to_description_suffix_destructive() {
-        let mut ann = ModuleAnnotations::default();
-        ann.destructive = true;
+        let ann = ModuleAnnotations {
+            destructive: true,
+            ..Default::default()
+        };
         let result = AnnotationMapper::to_description_suffix(Some(&ann));
         assert!(result.contains("DESTRUCTIVE"));
         assert!(result.contains("WARNING"));
@@ -214,17 +225,21 @@ mod tests {
 
     #[test]
     fn test_to_description_suffix_requires_approval() {
-        let mut ann = ModuleAnnotations::default();
-        ann.requires_approval = true;
+        let ann = ModuleAnnotations {
+            requires_approval: true,
+            ..Default::default()
+        };
         let result = AnnotationMapper::to_description_suffix(Some(&ann));
         assert!(result.contains("REQUIRES APPROVAL"));
     }
 
     #[test]
     fn test_to_description_suffix_non_default_values() {
-        let mut ann = ModuleAnnotations::default();
-        ann.readonly = true;
-        ann.streaming = true;
+        let ann = ModuleAnnotations {
+            readonly: true,
+            streaming: true,
+            ..Default::default()
+        };
         let result = AnnotationMapper::to_description_suffix(Some(&ann));
         assert!(result.contains("[Annotations:"));
         assert!(result.contains("readonly=true"));
@@ -240,9 +255,11 @@ mod tests {
 
     #[test]
     fn test_to_description_suffix_destructive_and_approval() {
-        let mut ann = ModuleAnnotations::default();
-        ann.destructive = true;
-        ann.requires_approval = true;
+        let ann = ModuleAnnotations {
+            destructive: true,
+            requires_approval: true,
+            ..Default::default()
+        };
         let result = AnnotationMapper::to_description_suffix(Some(&ann));
         assert!(result.contains("DESTRUCTIVE"));
         assert!(result.contains("REQUIRES APPROVAL"));
@@ -262,8 +279,10 @@ mod tests {
 
     #[test]
     fn test_has_requires_approval_true() {
-        let mut ann = ModuleAnnotations::default();
-        ann.requires_approval = true;
+        let ann = ModuleAnnotations {
+            requires_approval: true,
+            ..Default::default()
+        };
         assert!(AnnotationMapper::has_requires_approval(Some(&ann)));
     }
 

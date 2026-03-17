@@ -3,7 +3,6 @@
 //! Combines the factory, router, transport, and listener into a single
 //! server lifecycle.
 
-
 use std::collections::HashSet;
 use std::fmt;
 use std::future::Future;
@@ -15,9 +14,7 @@ use serde_json::Value;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use crate::server::types::{
-    CallToolResult, ReadResourceContents, Resource, Tool,
-};
+use crate::server::types::{CallToolResult, ReadResourceContents, Resource, Tool};
 
 // ---------------------------------------------------------------------------
 // TransportKind
@@ -153,6 +150,10 @@ pub type CallToolHandler = Arc<
         + Sync,
 >;
 
+/// Type alias for the read_resource handler.
+pub type ReadResourceHandler =
+    Arc<dyn Fn(String) -> Result<Vec<ReadResourceContents>, FactoryError> + Send + Sync>;
+
 // ---------------------------------------------------------------------------
 // RegistryOrExecutor
 // ---------------------------------------------------------------------------
@@ -189,8 +190,7 @@ pub struct MCPServer {
     /// Handler for `list_resources` requests.
     pub(crate) list_resources_handler: Option<Arc<dyn Fn() -> Vec<Resource> + Send + Sync>>,
     /// Handler for `read_resource` requests.
-    pub(crate) read_resource_handler:
-        Option<Arc<dyn Fn(String) -> Result<Vec<ReadResourceContents>, FactoryError> + Send + Sync>>,
+    pub(crate) read_resource_handler: Option<ReadResourceHandler>,
 
     // --- Lifecycle state ---
     /// Handle for the spawned server task.
@@ -235,7 +235,9 @@ impl MCPServer {
     ///
     /// Prefer [`MCPServer::new`] with [`MCPServerConfig`] for new code.
     pub fn with_params(name: &str, transport: &str, host: &str, port: u16) -> Self {
-        let transport_kind = transport.parse::<TransportKind>().unwrap_or(TransportKind::Stdio);
+        let transport_kind = transport
+            .parse::<TransportKind>()
+            .unwrap_or(TransportKind::Stdio);
         let config = MCPServerConfig {
             name: name.to_string(),
             transport: transport_kind,
@@ -283,7 +285,9 @@ impl MCPServer {
         arguments: Value,
         extra: Option<Value>,
     ) -> Option<Pin<Box<dyn Future<Output = CallToolResult> + Send>>> {
-        self.call_tool_handler.as_ref().map(|h| h(name, arguments, extra))
+        self.call_tool_handler
+            .as_ref()
+            .map(|h| h(name, arguments, extra))
     }
 
     /// Invoke the list_resources handler if registered.
@@ -292,7 +296,10 @@ impl MCPServer {
     }
 
     /// Invoke the read_resource handler if registered.
-    pub fn read_resource(&self, uri: String) -> Option<Result<Vec<ReadResourceContents>, FactoryError>> {
+    pub fn read_resource(
+        &self,
+        uri: String,
+    ) -> Option<Result<Vec<ReadResourceContents>, FactoryError>> {
         self.read_resource_handler.as_ref().map(|h| h(uri))
     }
 
@@ -381,7 +388,9 @@ impl MCPServer {
     ///
     /// Delegates to [`TransportKind::address`].
     pub fn address(&self) -> String {
-        self.config.transport.address(&self.config.host, self.config.port)
+        self.config
+            .transport
+            .address(&self.config.host, self.config.port)
     }
 }
 
@@ -397,7 +406,10 @@ mod tests {
 
     #[test]
     fn transport_kind_from_str_stdio() {
-        assert_eq!("stdio".parse::<TransportKind>().unwrap(), TransportKind::Stdio);
+        assert_eq!(
+            "stdio".parse::<TransportKind>().unwrap(),
+            TransportKind::Stdio
+        );
     }
 
     #[test]
@@ -415,8 +427,14 @@ mod tests {
 
     #[test]
     fn transport_kind_from_str_case_insensitive() {
-        assert_eq!("STDIO".parse::<TransportKind>().unwrap(), TransportKind::Stdio);
-        assert_eq!("Streamable-Http".parse::<TransportKind>().unwrap(), TransportKind::StreamableHttp);
+        assert_eq!(
+            "STDIO".parse::<TransportKind>().unwrap(),
+            TransportKind::Stdio
+        );
+        assert_eq!(
+            "Streamable-Http".parse::<TransportKind>().unwrap(),
+            TransportKind::StreamableHttp
+        );
         assert_eq!("SSE".parse::<TransportKind>().unwrap(), TransportKind::Sse);
     }
 
@@ -472,8 +490,8 @@ mod tests {
         assert_eq!(config.port, 8000);
         assert_eq!(config.name, "apcore-mcp");
         assert_eq!(config.version, None);
-        assert_eq!(config.validate_inputs, false);
-        assert_eq!(config.require_auth, true);
+        assert!(!config.validate_inputs);
+        assert!(config.require_auth);
         assert_eq!(config.tags, None);
         assert_eq!(config.prefix, None);
         assert_eq!(config.exempt_paths, None);
@@ -498,8 +516,8 @@ mod tests {
         assert_eq!(config.port, 9090);
         assert_eq!(config.name, "my-server");
         assert_eq!(config.version, Some("1.0.0".to_string()));
-        assert_eq!(config.validate_inputs, true);
-        assert_eq!(config.require_auth, false);
+        assert!(config.validate_inputs);
+        assert!(!config.require_auth);
         assert_eq!(config.tags.as_ref().unwrap().len(), 1);
         assert_eq!(config.prefix, Some("my_prefix".to_string()));
         assert!(config.exempt_paths.as_ref().unwrap().contains("/_health"));
@@ -552,8 +570,8 @@ mod tests {
             ..Default::default()
         };
         let server = MCPServer::new(config);
-        assert_eq!(server.config().validate_inputs, true);
-        assert_eq!(server.config().require_auth, false);
+        assert!(server.config().validate_inputs);
+        assert!(!server.config().require_auth);
     }
 
     // ---- Task 4: RegistryOrExecutor and struct completeness ----
@@ -700,13 +718,16 @@ mod tests {
     #[test]
     fn has_tool_handlers_true_when_both_set() {
         let mut server = MCPServer::new(MCPServerConfig::default());
-        server.list_tools_handler = Some(Arc::new(|| vec![]));
+        server.list_tools_handler = Some(Arc::new(Vec::new));
         // Only list_tools set — should still be false
         assert!(!server.has_tool_handlers());
 
         server.call_tool_handler = Some(Arc::new(|_name, _args, _extra| {
             Box::pin(async {
-                CallToolResult { content: vec![], is_error: false }
+                CallToolResult {
+                    content: vec![],
+                    is_error: false,
+                }
             })
         }));
         assert!(server.has_tool_handlers());
@@ -715,7 +736,7 @@ mod tests {
     #[test]
     fn has_resource_handlers_true_when_both_set() {
         let mut server = MCPServer::new(MCPServerConfig::default());
-        server.list_resources_handler = Some(Arc::new(|| vec![]));
+        server.list_resources_handler = Some(Arc::new(Vec::new));
         assert!(!server.has_resource_handlers());
 
         server.read_resource_handler = Some(Arc::new(|_uri| Ok(vec![])));
@@ -756,7 +777,10 @@ mod tests {
         let mut server = MCPServer::new(MCPServerConfig::default());
         server.call_tool_handler = Some(Arc::new(|_name, _args, _extra| {
             Box::pin(async move {
-                CallToolResult { content: vec![], is_error: false }
+                CallToolResult {
+                    content: vec![],
+                    is_error: false,
+                }
             })
         }));
         let fut = server.call_tool("my-tool".into(), Value::Null, None);
@@ -854,7 +878,7 @@ mod tests {
     fn transport_kind_clone_and_copy() {
         let t = TransportKind::Sse;
         let t2 = t; // Copy
-        let t3 = t.clone();
+        let t3 = t;
         assert_eq!(t, t2);
         assert_eq!(t, t3);
     }

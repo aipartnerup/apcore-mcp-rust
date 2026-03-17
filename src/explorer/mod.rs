@@ -1,8 +1,7 @@
 //! Explorer sub-module — introspection mount for browsing registered tools.
+//!
+//! Delegates to `mcp-embedded-ui` for HTML rendering and HTTP handlers.
 
-pub mod api;
-pub mod mount;
-pub mod templates;
+mod mount;
 
 pub use mount::{create_explorer_mount, CallResult, ExplorerConfig, HandleCallFn, ToolInfo};
-pub use api::{CallResponse, ExplorerState};

@@ -16,6 +16,9 @@ use tokio_stream::Stream;
 
 use crate::helpers::{ElicitResult, MCP_ELICIT_KEY, MCP_PROGRESS_KEY};
 
+/// A boxed stream of result chunks from a streaming executor.
+pub type StreamResult = Pin<Box<dyn Stream<Item = Result<Value, ExecutorError>> + Send>>;
+
 // ---------------------------------------------------------------------------
 // Task 1: Executor trait
 // ---------------------------------------------------------------------------
@@ -80,7 +83,7 @@ pub trait Executor: Send + Sync {
         _module_id: &str,
         _inputs: &Value,
         _context: Option<&Value>,
-    ) -> Option<Pin<Box<dyn Stream<Item = Result<Value, ExecutorError>> + Send>>> {
+    ) -> Option<StreamResult> {
         None
     }
 
@@ -149,8 +152,11 @@ pub type OutputFormatter =
 
 /// Async function for sending MCP notifications (e.g. progress).
 pub type SendNotificationFn = Arc<
-    dyn Fn(Value) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send>>
-        + Send
+    dyn Fn(
+            Value,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send>,
+        > + Send
         + Sync,
 >;
 
@@ -228,6 +234,21 @@ impl ExecutionRouter {
         }
     }
 
+    /// Create a router without an executor but with optional formatter.
+    ///
+    /// Useful when the executor is not yet available (e.g. during startup)
+    /// but the output formatter should be pre-configured.
+    pub fn new_with_formatter(
+        validate_inputs: bool,
+        output_formatter: Option<OutputFormatter>,
+    ) -> Self {
+        Self {
+            executor: None,
+            validate_inputs,
+            output_formatter,
+        }
+    }
+
     /// Create a new router.
     ///
     /// # Arguments
@@ -282,11 +303,7 @@ impl ExecutionRouter {
                     e.errors
                         .iter()
                         .map(|sub| {
-                            format!(
-                                "{}: {}",
-                                sub.field.as_deref().unwrap_or("?"),
-                                &sub.message
-                            )
+                            format!("{}: {}", sub.field.as_deref().unwrap_or("?"), &sub.message)
                         })
                         .collect::<Vec<_>>()
                 } else if let Some(ref field) = e.field {
@@ -327,8 +344,7 @@ impl ExecutionRouter {
         tracing::debug!("Executing tool call: {tool_name}");
 
         // Extract streaming helpers and identity from extra
-        let (progress_token, send_notification, session, identity) =
-            Self::extract_extra(extra);
+        let (progress_token, send_notification, session, identity) = Self::extract_extra(extra);
 
         // Build per-call context
         let call_extra = CallExtra {
@@ -340,8 +356,7 @@ impl ExecutionRouter {
         let (context_value, _context_data) = Self::build_context(&call_extra);
 
         // Re-extract after building context (we moved them into CallExtra)
-        let (progress_token, send_notification, _, _) =
-            Self::extract_extra(extra);
+        let (progress_token, send_notification, _, _) = Self::extract_extra(extra);
 
         // Pre-execution validation
         if self.validate_inputs {
@@ -379,6 +394,7 @@ impl ExecutionRouter {
     /// Extract progress_token, send_notification, session, and identity from
     /// the extra `Value`. Returns `(None, None, None, None)` when extra is
     /// `None`.
+    #[allow(clippy::type_complexity)]
     fn extract_extra(
         extra: Option<&Value>,
     ) -> (
@@ -390,21 +406,15 @@ impl ExecutionRouter {
         // In the current integration the factory passes a plain JSON Value
         // which does not carry callbacks. Real callbacks would come from a
         // typed CallExtra.  For now we extract identity from JSON.
-        let identity = extra
-            .and_then(|v| v.get("identity"))
-            .cloned();
+        let identity = extra.and_then(|v| v.get("identity")).cloned();
 
-        let progress_token = extra
-            .and_then(|v| v.get("progress_token"))
-            .and_then(|v| {
-                if let Some(s) = v.as_str() {
-                    Some(ProgressToken::String(s.to_string()))
-                } else if let Some(i) = v.as_i64() {
-                    Some(ProgressToken::Integer(i))
-                } else {
-                    None
-                }
-            });
+        let progress_token = extra.and_then(|v| v.get("progress_token")).and_then(|v| {
+            if let Some(s) = v.as_str() {
+                Some(ProgressToken::String(s.to_string()))
+            } else {
+                v.as_i64().map(ProgressToken::Integer)
+            }
+        });
 
         // send_notification and session cannot be extracted from plain JSON
         (progress_token, None, None, identity)
@@ -496,13 +506,12 @@ impl ExecutionRouter {
                     Box::pin(async move {
                         let mut params = serde_json::Map::new();
                         params.insert("progressToken".to_string(), token_val);
-                        params.insert(
-                            "progress".to_string(),
-                            serde_json::json!(progress),
-                        );
+                        params.insert("progress".to_string(), serde_json::json!(progress));
                         params.insert(
                             "total".to_string(),
-                            total.map(|t| serde_json::json!(t)).unwrap_or(serde_json::json!(0)),
+                            total
+                                .map(|t| serde_json::json!(t))
+                                .unwrap_or(serde_json::json!(0)),
                         );
                         if let Some(msg) = message {
                             params.insert("message".to_string(), Value::String(msg));
@@ -516,10 +525,7 @@ impl ExecutionRouter {
                         }
                     })
                 });
-            data.insert(
-                MCP_PROGRESS_KEY.to_string(),
-                Box::new(progress_cb),
-            );
+            data.insert(MCP_PROGRESS_KEY.to_string(), Box::new(progress_cb));
         }
 
         // Inject elicit callback
@@ -677,9 +683,7 @@ impl ExecutionRouter {
             Some(s) => s,
             None => {
                 // Fallback to non-streaming
-                return self
-                    .handle_call_async(tool_name, arguments, context)
-                    .await;
+                return self.handle_call_async(tool_name, arguments, context).await;
             }
         };
 
@@ -783,11 +787,8 @@ mod tests {
             _module_id: &str,
             _inputs: &Value,
             _context: Option<&Value>,
-        ) -> Option<Pin<Box<dyn Stream<Item = Result<Value, ExecutorError>> + Send>>> {
-            let chunks = vec![
-                Ok(json!({"a": 1})),
-                Ok(json!({"b": 2})),
-            ];
+        ) -> Option<StreamResult> {
+            let chunks = vec![Ok(json!({"a": 1})), Ok(json!({"b": 2}))];
             Some(Box::pin(tokio_stream::iter(chunks)))
         }
 
@@ -1014,6 +1015,26 @@ mod tests {
     }
 
     #[test]
+    fn test_new_with_formatter_preserves_settings() {
+        let formatter: OutputFormatter = Box::new(|val| {
+            let obj = val.as_object().unwrap();
+            Ok(format!("keys={}", obj.len()))
+        });
+        let router = ExecutionRouter::new_with_formatter(true, Some(formatter));
+        assert!(router.validate_inputs);
+        assert!(router.executor.is_none());
+        assert_eq!(router.format_result(&json!({"a": 1})), "keys=1");
+    }
+
+    #[test]
+    fn test_new_with_formatter_none() {
+        let router = ExecutionRouter::new_with_formatter(false, None);
+        assert!(!router.validate_inputs);
+        assert!(router.output_formatter.is_none());
+        assert_eq!(router.format_result(&json!(42)), "42");
+    }
+
+    #[test]
     fn test_format_result_default_number() {
         let router = ExecutionRouter::stub();
         let result = router.format_result(&json!(42));
@@ -1044,9 +1065,7 @@ mod tests {
 
     #[test]
     fn test_format_result_custom_formatter_non_object_ignored() {
-        let formatter: OutputFormatter = Box::new(|_val| {
-            Ok("should not be called".to_string())
-        });
+        let formatter: OutputFormatter = Box::new(|_val| Ok("should not be called".to_string()));
         let router = ExecutionRouter {
             executor: None,
             validate_inputs: false,
@@ -1060,9 +1079,7 @@ mod tests {
 
     #[test]
     fn test_format_result_custom_formatter_error_fallback() {
-        let formatter: OutputFormatter = Box::new(|_val| {
-            Err("formatter exploded".into())
-        });
+        let formatter: OutputFormatter = Box::new(|_val| Err("formatter exploded".into()));
         let router = ExecutionRouter {
             executor: None,
             validate_inputs: false,
@@ -1391,7 +1408,10 @@ mod tests {
     #[tokio::test]
     async fn test_call_async_error_mapped() {
         let router = ExecutionRouter::new(
-            Box::new(FailingExecutor::new("MODULE_EXECUTE_ERROR", "division by zero")),
+            Box::new(FailingExecutor::new(
+                "MODULE_EXECUTE_ERROR",
+                "division by zero",
+            )),
             false,
             None,
         );
@@ -1410,9 +1430,7 @@ mod tests {
             false,
             None,
         );
-        let (content, is_error, _) = router
-            .handle_call_async("mod", &json!({}), None)
-            .await;
+        let (content, is_error, _) = router.handle_call_async("mod", &json!({}), None).await;
         assert!(is_error);
         let text = content[0].data.as_str().unwrap();
         assert!(text.contains("something went wrong"));
@@ -1420,27 +1438,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_call_async_error_is_error_true() {
-        let router = ExecutionRouter::new(
-            Box::new(FailingExecutor::new("ERR", "fail")),
-            false,
-            None,
-        );
-        let (_, is_error, _) = router
-            .handle_call_async("mod", &json!({}), None)
-            .await;
+        let router =
+            ExecutionRouter::new(Box::new(FailingExecutor::new("ERR", "fail")), false, None);
+        let (_, is_error, _) = router.handle_call_async("mod", &json!({}), None).await;
         assert!(is_error);
     }
 
     #[tokio::test]
     async fn test_call_async_error_no_trace_id() {
-        let router = ExecutionRouter::new(
-            Box::new(FailingExecutor::new("ERR", "fail")),
-            false,
-            None,
-        );
-        let (_, _, trace_id) = router
-            .handle_call_async("mod", &json!({}), None)
-            .await;
+        let router =
+            ExecutionRouter::new(Box::new(FailingExecutor::new("ERR", "fail")), false, None);
+        let (_, _, trace_id) = router.handle_call_async("mod", &json!({}), None).await;
         assert!(trace_id.is_none());
     }
 
@@ -1455,9 +1463,7 @@ mod tests {
             false,
             None,
         );
-        let (content, is_error, _) = router
-            .handle_call_async("mod", &json!({}), None)
-            .await;
+        let (content, is_error, _) = router.handle_call_async("mod", &json!({}), None).await;
         assert!(is_error);
         let text = content[0].data.as_str().unwrap();
         assert!(text.contains("too large"));
@@ -1533,7 +1539,7 @@ mod tests {
             _module_id: &str,
             _inputs: &Value,
             _context: Option<&Value>,
-        ) -> Option<Pin<Box<dyn Stream<Item = Result<Value, ExecutorError>> + Send>>> {
+        ) -> Option<StreamResult> {
             // We need to clone the data for the stream
             let chunks: Vec<Result<Value, ExecutorError>> = self
                 .chunks
@@ -1696,10 +1702,7 @@ mod tests {
     async fn test_stream_accumulates_nested() {
         let (sn, _) = make_send_notification();
         let executor = StreamingMockExecutor {
-            chunks: vec![
-                Ok(json!({"data": {"x": 1}})),
-                Ok(json!({"data": {"y": 2}})),
-            ],
+            chunks: vec![Ok(json!({"data": {"x": 1}})), Ok(json!({"data": {"y": 2}}))],
         };
         let router = ExecutionRouter::new(Box::new(executor), false, None);
         let token = ProgressToken::String("tok".into());
@@ -2147,9 +2150,7 @@ mod tests {
     async fn test_handle_call_value_with_identity() {
         let router = ExecutionRouter::new(Box::new(IdentityCapturingExecutor), false, None);
         let extra = json!({"identity": {"id": "user-2"}});
-        let (content, is_error, _) = router
-            .handle_call("mod", &json!({}), Some(&extra))
-            .await;
+        let (content, is_error, _) = router.handle_call("mod", &json!({}), Some(&extra)).await;
         assert!(!is_error);
         let text = content[0].data.as_str().unwrap();
         let parsed: Value = serde_json::from_str(text).unwrap();
@@ -2245,7 +2246,7 @@ mod tests {
             _module_id: &str,
             _inputs: &Value,
             _context: Option<&Value>,
-        ) -> Option<Pin<Box<dyn Stream<Item = Result<Value, ExecutorError>> + Send>>> {
+        ) -> Option<StreamResult> {
             let chunks = self.stream_chunks.lock().unwrap().take()?;
             let cloned: Vec<Result<Value, ExecutorError>> = chunks
                 .into_iter()
@@ -2279,8 +2280,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_e2e_simple_call() {
-        let executor = ConfigurableExecutor::new()
-            .with_call_result(Ok(json!({"status": "ok", "count": 42})));
+        let executor =
+            ConfigurableExecutor::new().with_call_result(Ok(json!({"status": "ok", "count": 42})));
         let router = ExecutionRouter::new(Box::new(executor), false, None);
         let (content, is_error, trace_id) = router
             .handle_call_with_extra("my.tool", &json!({"input": 1}), None)
@@ -2295,16 +2296,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_e2e_call_with_custom_formatter() {
-        let executor = ConfigurableExecutor::new()
-            .with_call_result(Ok(json!({"x": 1, "y": 2})));
+        let executor = ConfigurableExecutor::new().with_call_result(Ok(json!({"x": 1, "y": 2})));
         let formatter: OutputFormatter = Box::new(|val| {
-            let keys: Vec<&str> = val.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+            let keys: Vec<&str> = val
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(|k| k.as_str())
+                .collect();
             Ok(format!("Keys: {}", keys.join(", ")))
         });
         let router = ExecutionRouter::new(Box::new(executor), false, Some(formatter));
-        let (content, is_error, _) = router
-            .handle_call_with_extra("mod", &json!({}), None)
-            .await;
+        let (content, is_error, _) = router.handle_call_with_extra("mod", &json!({}), None).await;
         assert!(!is_error);
         let text = content[0].data.as_str().unwrap();
         assert!(text.starts_with("Keys: "));
@@ -2312,17 +2315,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_e2e_call_error_mapped() {
-        let executor = ConfigurableExecutor::new().with_call_result(Err(
-            ExecutorError::Execution {
+        let executor =
+            ConfigurableExecutor::new().with_call_result(Err(ExecutorError::Execution {
                 code: "ERR_DIVIDE".into(),
                 message: "cannot divide by zero".into(),
                 details: None,
-            },
-        ));
+            }));
         let router = ExecutionRouter::new(Box::new(executor), false, None);
-        let (content, is_error, _) = router
-            .handle_call_with_extra("mod", &json!({}), None)
-            .await;
+        let (content, is_error, _) = router.handle_call_with_extra("mod", &json!({}), None).await;
         assert!(is_error);
         let text = content[0].data.as_str().unwrap();
         assert!(text.contains("cannot divide by zero"));
@@ -2379,8 +2379,8 @@ mod tests {
     #[tokio::test]
     async fn test_e2e_streaming_notification_content() {
         let (sn, captured) = make_send_notification();
-        let executor = ConfigurableExecutor::new()
-            .with_stream_chunks(vec![Ok(json!({"step": "done"}))]);
+        let executor =
+            ConfigurableExecutor::new().with_stream_chunks(vec![Ok(json!({"step": "done"}))]);
         let router = ExecutionRouter::new(Box::new(executor), false, None);
         let extra = CallExtra {
             progress_token: Some(ProgressToken::String("tok-notif".into())),
@@ -2433,8 +2433,7 @@ mod tests {
     async fn test_e2e_streaming_fallback_no_support() {
         // Executor without stream support falls back to non-streaming
         let (sn, captured) = make_send_notification();
-        let executor = ConfigurableExecutor::new()
-            .with_call_result(Ok(json!({"fallback": true})));
+        let executor = ConfigurableExecutor::new().with_call_result(Ok(json!({"fallback": true})));
         // Don't set stream_chunks — stream() returns None
         let router = ExecutionRouter::new(Box::new(executor), false, None);
         let extra = CallExtra {
@@ -2464,9 +2463,7 @@ mod tests {
             })
             .with_call_result(Ok(json!({"result": "success"})));
         let router = ExecutionRouter::new(Box::new(executor), true, None);
-        let (content, is_error, _) = router
-            .handle_call_with_extra("mod", &json!({}), None)
-            .await;
+        let (content, is_error, _) = router.handle_call_with_extra("mod", &json!({}), None).await;
         assert!(!is_error);
         let text = content[0].data.as_str().unwrap();
         let parsed: Value = serde_json::from_str(text).unwrap();
@@ -2486,9 +2483,7 @@ mod tests {
             })
             .with_call_result(Ok(json!({"should": "not reach"})));
         let router = ExecutionRouter::new(Box::new(executor), true, None);
-        let (content, is_error, _) = router
-            .handle_call_with_extra("mod", &json!({}), None)
-            .await;
+        let (content, is_error, _) = router.handle_call_with_extra("mod", &json!({}), None).await;
         assert!(is_error);
         let text = content[0].data.as_str().unwrap();
         assert!(text.contains("Validation failed"));
@@ -2509,9 +2504,7 @@ mod tests {
             })
             .with_call_result(Ok(json!({"executed": true})));
         let router = ExecutionRouter::new(Box::new(executor), false, None);
-        let (content, is_error, _) = router
-            .handle_call_with_extra("mod", &json!({}), None)
-            .await;
+        let (content, is_error, _) = router.handle_call_with_extra("mod", &json!({}), None).await;
         assert!(!is_error);
         let text = content[0].data.as_str().unwrap();
         let parsed: Value = serde_json::from_str(text).unwrap();
@@ -2520,12 +2513,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_e2e_no_extra() {
-        let executor = ConfigurableExecutor::new()
-            .with_call_result(Ok(json!({"ok": true})));
+        let executor = ConfigurableExecutor::new().with_call_result(Ok(json!({"ok": true})));
         let router = ExecutionRouter::new(Box::new(executor), false, None);
-        let (content, is_error, _) = router
-            .handle_call_with_extra("mod", &json!({}), None)
-            .await;
+        let (content, is_error, _) = router.handle_call_with_extra("mod", &json!({}), None).await;
         assert!(!is_error);
         let text = content[0].data.as_str().unwrap();
         let parsed: Value = serde_json::from_str(text).unwrap();
@@ -2534,8 +2524,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_e2e_error_with_ai_guidance() {
-        let executor = ConfigurableExecutor::new().with_call_result(Err(
-            ExecutorError::Execution {
+        let executor =
+            ConfigurableExecutor::new().with_call_result(Err(ExecutorError::Execution {
                 code: "RATE_LIMIT".into(),
                 message: "Too many requests".into(),
                 details: Some(json!({
@@ -2543,12 +2533,9 @@ mod tests {
                     "aiGuidance": "Wait 10 seconds and retry",
                     "suggestion": "reduce request rate"
                 })),
-            },
-        ));
+            }));
         let router = ExecutionRouter::new(Box::new(executor), false, None);
-        let (content, is_error, _) = router
-            .handle_call_with_extra("mod", &json!({}), None)
-            .await;
+        let (content, is_error, _) = router.handle_call_with_extra("mod", &json!({}), None).await;
         assert!(is_error);
         let text = content[0].data.as_str().unwrap();
         assert!(text.contains("Too many requests"));

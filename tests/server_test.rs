@@ -9,5 +9,5 @@ fn placeholder_server_test() {
     // TODO: Test ExecutionRouter call handling
     // TODO: Test TransportManager transport setup
     // TODO: Test RegistryListener event handling
-    assert!(true, "server tests not yet implemented");
+    // server tests not yet implemented
 }

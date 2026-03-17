@@ -244,8 +244,7 @@ mod tests {
 
     #[test]
     fn progress_callback_is_constructible() {
-        let _cb: ProgressCallback =
-            Box::new(|_progress, _total, _message| Box::pin(async {}));
+        let _cb: ProgressCallback = Box::new(|_progress, _total, _message| Box::pin(async {}));
     }
 
     #[test]
@@ -424,9 +423,7 @@ mod tests {
 
     #[tokio::test]
     async fn elicit_callback_returns_none_propagates() {
-        let cb: ElicitCallback = Box::new(|_message, _schema| {
-            Box::pin(async { None })
-        });
+        let cb: ElicitCallback = Box::new(|_message, _schema| Box::pin(async { None }));
 
         let ctx = json!({});
         let result = elicit(&ctx, Some(&cb), "hello?", None).await;
@@ -447,7 +444,9 @@ mod tests {
         });
 
         let ctx = json!({});
-        let result = elicit(&ctx, Some(&cb), "are you sure?", None).await.unwrap();
+        let result = elicit(&ctx, Some(&cb), "are you sure?", None)
+            .await
+            .unwrap();
         assert_eq!(result.action, ElicitAction::Cancel);
         assert!(result.content.is_none());
     }
@@ -576,15 +575,16 @@ mod tests {
         report_progress(&ctx, Some(&progress_cb), 100.0, Some(100.0), Some("done")).await;
 
         // Verify all progress calls were captured
-        let calls = progress_calls.lock().unwrap();
-        assert_eq!(calls.len(), 3);
-        assert!((calls[0].0 - 0.0).abs() < f64::EPSILON);
-        assert_eq!(calls[0].2.as_deref(), Some("starting"));
-        assert!((calls[1].0 - 50.0).abs() < f64::EPSILON);
-        assert_eq!(calls[1].2.as_deref(), Some("halfway"));
-        assert!((calls[2].0 - 100.0).abs() < f64::EPSILON);
-        assert_eq!(calls[2].2.as_deref(), Some("done"));
-        drop(calls);
+        {
+            let calls = progress_calls.lock().unwrap();
+            assert_eq!(calls.len(), 3);
+            assert!((calls[0].0 - 0.0).abs() < f64::EPSILON);
+            assert_eq!(calls[0].2.as_deref(), Some("starting"));
+            assert!((calls[1].0 - 50.0).abs() < f64::EPSILON);
+            assert_eq!(calls[1].2.as_deref(), Some("halfway"));
+            assert!((calls[2].0 - 100.0).abs() < f64::EPSILON);
+            assert_eq!(calls[2].2.as_deref(), Some("done"));
+        }
 
         // Call elicit with a schema
         let schema = json!({"type": "object", "properties": {"name": {"type": "string"}}});

@@ -26,7 +26,10 @@ pub fn extract_headers<B>(req: &Request<B>) -> HashMap<String, String> {
     req.headers()
         .iter()
         .filter_map(|(name, value)| {
-            value.to_str().ok().map(|v| (name.to_string(), v.to_string()))
+            value
+                .to_str()
+                .ok()
+                .map(|v| (name.to_string(), v.to_string()))
         })
         .collect()
 }
@@ -121,7 +124,9 @@ fn is_path_exempt(path: &str, exempt_paths: &HashSet<String>, exempt_prefixes: &
     if exempt_paths.contains(path) {
         return true;
     }
-    exempt_prefixes.iter().any(|prefix| path.starts_with(prefix))
+    exempt_prefixes
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
 }
 
 impl<S> Service<Request<Body>> for AuthMiddlewareService<S>
@@ -157,9 +162,7 @@ where
             if is_exempt {
                 // Best-effort: try to authenticate but ignore failures.
                 let identity = authenticator.authenticate(&headers).await;
-                AUTH_IDENTITY
-                    .scope(identity, inner.call(req))
-                    .await
+                AUTH_IDENTITY.scope(identity, inner.call(req)).await
             } else {
                 let identity = authenticator.authenticate(&headers).await;
 
@@ -168,9 +171,7 @@ where
                     return Ok(build_401_response());
                 }
 
-                AUTH_IDENTITY
-                    .scope(identity, inner.call(req))
-                    .await
+                AUTH_IDENTITY.scope(identity, inner.call(req)).await
             }
         })
     }
@@ -221,7 +222,9 @@ mod tests {
     async fn echo_handler(_req: Request<Body>) -> Result<Response<Body>, Infallible> {
         let identity_id = AUTH_IDENTITY
             .try_with(|id| {
-                id.as_ref().map(|i| i.id.clone()).unwrap_or_else(|| "anonymous".to_string())
+                id.as_ref()
+                    .map(|i| i.id.clone())
+                    .unwrap_or_else(|| "anonymous".to_string())
             })
             .unwrap_or_else(|_| "no-task-local".to_string());
 
@@ -276,9 +279,7 @@ mod tests {
 
     #[test]
     fn extract_headers_empty() {
-        let req = Request::get("/")
-            .body(Body::empty())
-            .unwrap();
+        let req = Request::get("/").body(Body::empty()).unwrap();
         let headers = extract_headers(&req);
         // Host may or may not be present depending on builder; just check no panic.
         assert!(headers.len() <= 1);
@@ -291,22 +292,19 @@ mod tests {
         let auth: Arc<dyn Authenticator> = Arc::new(RejectAuthenticator);
         let svc = make_service(auth);
 
-        let req = Request::get("/api/data")
-            .body(Body::empty())
-            .unwrap();
+        let req = Request::get("/api/data").body(Body::empty()).unwrap();
 
         let resp = svc.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(
-            resp.headers().get("www-authenticate").unwrap(),
-            "Bearer"
-        );
+        assert_eq!(resp.headers().get("www-authenticate").unwrap(), "Bearer");
         assert_eq!(
             resp.headers().get("content-type").unwrap(),
             "application/json"
         );
 
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"], "Unauthorized");
         assert_eq!(json["detail"], "Missing or invalid Bearer token");
@@ -329,7 +327,9 @@ mod tests {
         let resp = svc.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         assert_eq!(&body[..], b"test-user");
     }
 
@@ -340,14 +340,14 @@ mod tests {
         let auth: Arc<dyn Authenticator> = Arc::new(RejectAuthenticator);
         let svc = make_service(auth);
 
-        let req = Request::get("/health")
-            .body(Body::empty())
-            .unwrap();
+        let req = Request::get("/health").body(Body::empty()).unwrap();
 
         let resp = svc.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         assert_eq!(&body[..], b"anonymous");
     }
 
@@ -356,9 +356,7 @@ mod tests {
         let auth: Arc<dyn Authenticator> = Arc::new(RejectAuthenticator);
         let svc = make_service(auth);
 
-        let req = Request::get("/metrics")
-            .body(Body::empty())
-            .unwrap();
+        let req = Request::get("/metrics").body(Body::empty()).unwrap();
 
         let resp = svc.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -379,7 +377,9 @@ mod tests {
         let resp = svc.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         assert_eq!(&body[..], b"test-user");
     }
 
@@ -398,7 +398,9 @@ mod tests {
         let resp = svc.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         // Identity should be None since token was invalid, so we get "anonymous"
         assert_eq!(&body[..], b"anonymous");
     }
@@ -408,8 +410,7 @@ mod tests {
     #[tokio::test]
     async fn exempt_prefix_bypasses_auth() {
         let auth: Arc<dyn Authenticator> = Arc::new(RejectAuthenticator);
-        let layer = AuthMiddlewareLayer::new(auth)
-            .exempt_prefixes(vec!["/public/".to_string()]);
+        let layer = AuthMiddlewareLayer::new(auth).exempt_prefixes(vec!["/public/".to_string()]);
         let svc = make_service_with_layer(layer);
 
         let req = Request::get("/public/docs/readme")
@@ -423,13 +424,10 @@ mod tests {
     #[tokio::test]
     async fn non_matching_prefix_still_requires_auth() {
         let auth: Arc<dyn Authenticator> = Arc::new(RejectAuthenticator);
-        let layer = AuthMiddlewareLayer::new(auth)
-            .exempt_prefixes(vec!["/public/".to_string()]);
+        let layer = AuthMiddlewareLayer::new(auth).exempt_prefixes(vec!["/public/".to_string()]);
         let svc = make_service_with_layer(layer);
 
-        let req = Request::get("/api/data")
-            .body(Body::empty())
-            .unwrap();
+        let req = Request::get("/api/data").body(Body::empty()).unwrap();
 
         let resp = svc.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -443,14 +441,14 @@ mod tests {
         let layer = AuthMiddlewareLayer::new(auth).require_auth(false);
         let svc = make_service_with_layer(layer);
 
-        let req = Request::get("/api/data")
-            .body(Body::empty())
-            .unwrap();
+        let req = Request::get("/api/data").body(Body::empty()).unwrap();
 
         let resp = svc.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         assert_eq!(&body[..], b"anonymous");
     }
 
@@ -470,7 +468,9 @@ mod tests {
         let resp = svc.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         assert_eq!(&body[..], b"test-user");
     }
 
@@ -479,8 +479,8 @@ mod tests {
     #[tokio::test]
     async fn custom_exempt_paths_override_defaults() {
         let auth: Arc<dyn Authenticator> = Arc::new(RejectAuthenticator);
-        let layer = AuthMiddlewareLayer::new(auth)
-            .exempt_paths(HashSet::from(["/custom".to_string()]));
+        let layer =
+            AuthMiddlewareLayer::new(auth).exempt_paths(HashSet::from(["/custom".to_string()]));
         let svc = make_service_with_layer(layer);
 
         // /custom should be exempt
@@ -539,10 +539,15 @@ mod tests {
     async fn build_401_response_has_correct_structure() {
         let resp = build_401_response();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(resp.headers().get("content-type").unwrap(), "application/json");
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "application/json"
+        );
         assert_eq!(resp.headers().get("www-authenticate").unwrap(), "Bearer");
 
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"], "Unauthorized");
         assert_eq!(json["detail"], "Missing or invalid Bearer token");

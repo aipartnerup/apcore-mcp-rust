@@ -31,8 +31,14 @@ fn help_exits_zero() {
         output.status.code()
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("extensions-dir"), "help should mention --extensions-dir");
-    assert!(stdout.contains("apcore-mcp"), "help should mention apcore-mcp");
+    assert!(
+        stdout.contains("extensions-dir"),
+        "help should mention --extensions-dir"
+    );
+    assert!(
+        stdout.contains("apcore-mcp"),
+        "help should mention apcore-mcp"
+    );
 }
 
 #[test]

@@ -9,5 +9,5 @@ fn placeholder_adapters_test() {
     // TODO: Test SchemaConverter input/output schema conversion
     // TODO: Test ModuleIDNormalizer normalize/denormalize roundtrip
     // TODO: Test ElicitationApprovalHandler approval flow
-    assert!(true, "adapters tests not yet implemented");
+    // adapters tests not yet implemented
 }

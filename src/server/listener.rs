@@ -52,39 +52,41 @@ impl RegistryListener {
             let factory = Arc::clone(&factory);
             registry.on(
                 "register",
-                Box::new(move |module_id: &str, _module: &dyn apcore::module::Module| {
-                    if !active.load(Ordering::SeqCst) {
-                        return;
-                    }
-                    // Build a tool from the module's own schema info.
-                    // The callback receives the module reference directly, so we
-                    // construct a descriptor from it.
-                    let description = _module.description().to_string();
-                    let input_schema = _module.input_schema();
-                    let output_schema = _module.output_schema();
+                Box::new(
+                    move |module_id: &str, _module: &dyn apcore::module::Module| {
+                        if !active.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        // Build a tool from the module's own schema info.
+                        // The callback receives the module reference directly, so we
+                        // construct a descriptor from it.
+                        let description = _module.description().to_string();
+                        let input_schema = _module.input_schema();
+                        let output_schema = _module.output_schema();
 
-                    let descriptor = ModuleDescriptor {
-                        name: module_id.to_string(),
-                        annotations: apcore::module::ModuleAnnotations::default(),
-                        input_schema,
-                        output_schema,
-                        enabled: true,
-                        tags: vec![],
-                        dependencies: vec![],
-                    };
+                        let descriptor = ModuleDescriptor {
+                            name: module_id.to_string(),
+                            annotations: apcore::module::ModuleAnnotations::default(),
+                            input_schema,
+                            output_schema,
+                            enabled: true,
+                            tags: vec![],
+                            dependencies: vec![],
+                        };
 
-                    match factory.build_tool(&descriptor, &description, None) {
-                        Ok(tool) => {
-                            if let Ok(mut map) = tools.write() {
-                                map.insert(module_id.to_string(), tool);
+                        match factory.build_tool(&descriptor, &description, None) {
+                            Ok(tool) => {
+                                if let Ok(mut map) = tools.write() {
+                                    map.insert(module_id.to_string(), tool);
+                                }
+                                tracing::info!("Tool registered: {}", module_id);
                             }
-                            tracing::info!("Tool registered: {}", module_id);
+                            Err(e) => {
+                                tracing::warn!("Failed to build tool for {}: {}", module_id, e);
+                            }
                         }
-                        Err(e) => {
-                            tracing::warn!("Failed to build tool for {}: {}", module_id, e);
-                        }
-                    }
-                }),
+                    },
+                ),
             );
         }
 
@@ -94,19 +96,21 @@ impl RegistryListener {
             let active = Arc::clone(&self.active);
             registry.on(
                 "unregister",
-                Box::new(move |module_id: &str, _module: &dyn apcore::module::Module| {
-                    if !active.load(Ordering::SeqCst) {
-                        return;
-                    }
-                    let removed = if let Ok(mut map) = tools.write() {
-                        map.remove(module_id).is_some()
-                    } else {
-                        false
-                    };
-                    if removed {
-                        tracing::info!("Tool unregistered: {}", module_id);
-                    }
-                }),
+                Box::new(
+                    move |module_id: &str, _module: &dyn apcore::module::Module| {
+                        if !active.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        let removed = if let Ok(mut map) = tools.write() {
+                            map.remove(module_id).is_some()
+                        } else {
+                            false
+                        };
+                        if removed {
+                            tracing::info!("Tool unregistered: {}", module_id);
+                        }
+                    },
+                ),
             );
         }
     }
@@ -283,7 +287,11 @@ mod tests {
 
         // Exact count depends on timing, but should be between 10 and 20
         let count = listener.tools().len();
-        assert!(count >= 10 && count <= 20, "unexpected tool count: {}", count);
+        assert!(
+            (10..=20).contains(&count),
+            "unexpected tool count: {}",
+            count
+        );
     }
 
     #[test]

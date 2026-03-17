@@ -87,10 +87,7 @@ impl JWTAuthenticator {
     }
 
     /// Decode and validate a JWT token. Returns `None` on any error.
-    fn decode_token(
-        &self,
-        token: &str,
-    ) -> Option<HashMap<String, serde_json::Value>> {
+    fn decode_token(&self, token: &str) -> Option<HashMap<String, serde_json::Value>> {
         let mut validation = Validation::new(self.algorithms[0]);
         if self.algorithms.len() > 1 {
             validation.algorithms = self.algorithms.clone();
@@ -158,9 +155,9 @@ impl JWTAuthenticator {
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|v| match v {
-                        serde_json::Value::String(s) => Some(s.clone()),
-                        other => Some(other.to_string()),
+                    .map(|v| match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
                     })
                     .collect::<Vec<_>>()
             })
@@ -195,9 +192,7 @@ impl Authenticator for JWTAuthenticator {
             .map(|(_, v)| v.as_str())?;
 
         // Check for "Bearer " prefix (case-insensitive)
-        if auth_header.len() < 7
-            || !auth_header[..7].eq_ignore_ascii_case("bearer ")
-        {
+        if auth_header.len() < 7 || !auth_header[..7].eq_ignore_ascii_case("bearer ") {
             return None;
         }
 
@@ -337,15 +332,7 @@ mod tests {
 
     #[test]
     fn new_custom_require_auth_false() {
-        let auth = JWTAuthenticator::new(
-            TEST_SECRET,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(false),
-        );
+        let auth = JWTAuthenticator::new(TEST_SECRET, None, None, None, None, None, Some(false));
         assert!(!auth.require_auth());
     }
 
@@ -360,7 +347,10 @@ mod tests {
             "roles": ["admin", "reader"],
         }));
         let headers = headers_with_token(&token);
-        let identity = auth.authenticate(&headers).await.expect("should authenticate");
+        let identity = auth
+            .authenticate(&headers)
+            .await
+            .expect("should authenticate");
         assert_eq!(identity.id, "user-42");
         assert_eq!(identity.identity_type, "human");
         assert_eq!(identity.roles, vec!["admin", "reader"]);
@@ -469,8 +459,14 @@ mod tests {
         }));
         let headers = headers_with_token(&token);
         let identity = auth.authenticate(&headers).await.unwrap();
-        assert_eq!(identity.attrs.get("email").and_then(|v| v.as_str()), Some("alice@example.com"));
-        assert_eq!(identity.attrs.get("org").and_then(|v| v.as_str()), Some("acme"));
+        assert_eq!(
+            identity.attrs.get("email").and_then(|v| v.as_str()),
+            Some("alice@example.com")
+        );
+        assert_eq!(
+            identity.attrs.get("org").and_then(|v| v.as_str()),
+            Some("acme")
+        );
     }
 
     #[tokio::test]
