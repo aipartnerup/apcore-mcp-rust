@@ -1,12 +1,12 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/aipartnerup/apcore-mcp/main/apcore-mcp-logo.svg" alt="apcore-mcp logo" width="200"/>
+  <img src="https://raw.githubusercontent.com/aiperceivable/apcore-mcp/main/apcore-mcp-logo.svg" alt="apcore-mcp logo" width="200"/>
 </div>
 
 # apcore-mcp-rust
 
 Automatic MCP Server & OpenAI Tools Bridge for apcore (Rust edition).
 
-**apcore-mcp** turns any [apcore](https://github.com/aipartnerup/apcore)-based project into an MCP Server and OpenAI tool provider — with **zero code changes** to your existing project.
+**apcore-mcp** turns any [apcore](https://github.com/aiperceivable/apcore)-based project into an MCP Server and OpenAI tool provider — with **zero code changes** to your existing project.
 
 ```
 ┌──────────────────┐
@@ -34,7 +34,7 @@ Automatic MCP Server & OpenAI Tools Bridge for apcore (Rust edition).
 ## Documentation
 
 For full documentation, including Quick Start guides, visit:
-**[https://aipartnerup.github.io/apcore-mcp/](https://aipartnerup.github.io/apcore-mcp/)**
+**[https://aiperceivable.github.io/apcore-mcp/](https://aiperceivable.github.io/apcore-mcp/)**
 
 ## Installation
 
@@ -522,7 +522,7 @@ apcore-mcp-rust (separate process / library call)
 ## Development
 
 ```sh
-git clone https://github.com/aipartnerup/apcore-mcp-rust.git
+git clone https://github.com/aiperceivable/apcore-mcp-rust.git
 cd apcore-mcp-rust
 make setup                       # install toolchain + pre-commit hook
 make check                       # run all checks
