@@ -331,8 +331,8 @@ impl MCPServerFactory {
         let docs_for_list = Arc::clone(&docs);
         server.list_resources_handler = Some(Arc::new(move || {
             docs_for_list
-                .iter()
-                .map(|(module_id, _)| Resource {
+                .keys()
+                .map(|module_id| Resource {
                     uri: format!("docs://{}", module_id),
                     name: format!("{} documentation", module_id),
                     mime_type: "text/plain".to_string(),

@@ -10,7 +10,7 @@ Automatic MCP Server & OpenAI Tools Bridge for apcore (Rust edition).
 
 ```
 ┌──────────────────┐
-│  your apcore     │  ← your existing apcore project (unchanged)
+│  axum-apcore     │  ← your existing apcore project (unchanged)
 │  project         │
 └────────┬─────────┘
          │  extensions directory
