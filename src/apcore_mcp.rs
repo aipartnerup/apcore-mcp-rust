@@ -16,6 +16,7 @@ use apcore::registry::registry::Registry;
 
 use crate::auth::protocol::Authenticator;
 use crate::converters::openai::OpenAIConverter;
+use crate::explorer::{create_explorer_mount, ExplorerConfig, ToolInfo};
 use crate::server::factory::MCPServerFactory;
 use crate::server::router::{ExecutionRouter, OutputFormatter};
 use crate::server::server::MCPServer;
@@ -163,6 +164,14 @@ pub struct APCoreMCPConfig {
     pub explorer: bool,
     /// URL prefix for the explorer.
     pub explorer_prefix: String,
+    /// Page title shown in the explorer browser tab and heading.
+    pub explorer_title: String,
+    /// Optional project name shown in the explorer footer.
+    pub explorer_project_name: Option<String>,
+    /// Optional project URL linked in the explorer footer.
+    pub explorer_project_url: Option<String>,
+    /// Allow tool execution from the explorer UI.
+    pub allow_execute: bool,
 }
 
 impl Default for APCoreMCPConfig {
@@ -181,6 +190,10 @@ impl Default for APCoreMCPConfig {
             exempt_paths: None,
             explorer: false,
             explorer_prefix: "/explorer".to_string(),
+            explorer_title: "MCP Tool Explorer".to_string(),
+            explorer_project_name: None,
+            explorer_project_url: None,
+            allow_execute: false,
         }
     }
 }
@@ -197,8 +210,6 @@ pub struct APCoreMCP {
     config: APCoreMCPConfig,
     registry: Arc<Registry>,
     executor: Arc<Executor>,
-    // TODO: Wire into ExplorerConfig and AuthMiddlewareLayer when explorer
-    // integration is added to serve()/async_serve().
     #[allow(dead_code)]
     authenticator: Option<Arc<dyn Authenticator>>,
     metrics_collector: Option<Arc<dyn MetricsExporter>>,
@@ -304,6 +315,65 @@ impl APCoreMCP {
         Ok((server, router, tools, init_options, version))
     }
 
+    /// Build an [`ExplorerConfig`] from the given tools and explorer parameters.
+    #[allow(clippy::too_many_arguments)]
+    fn build_explorer_config(
+        &self,
+        tools: &[Tool],
+        router: &Arc<ExecutionRouter>,
+        prefix: &str,
+        allow_execute: bool,
+        title: &str,
+        project_name: Option<&str>,
+        project_url: Option<&str>,
+    ) -> ExplorerConfig {
+        let tool_infos: Vec<ToolInfo> = tools
+            .iter()
+            .map(|t| ToolInfo {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                input_schema: t.input_schema.clone(),
+            })
+            .collect();
+
+        let mut config = ExplorerConfig::new(tool_infos)
+            .explorer_prefix(prefix)
+            .allow_execute(allow_execute)
+            .title(title);
+
+        if let Some(name) = project_name {
+            config = config.project_name(name);
+        }
+        if let Some(url) = project_url {
+            config = config.project_url(url);
+        }
+
+        // Wire handle_call if allow_execute is enabled
+        if allow_execute {
+            let router_clone = Arc::clone(router);
+            config.handle_call = Some(Arc::new(move |name, args| {
+                let r = Arc::clone(&router_clone);
+                Box::pin(async move {
+                    let (content_items, is_error, error_type) =
+                        r.handle_call(&name, &args, None).await;
+                    // Convert ContentItem to Value for the explorer
+                    let values: Vec<serde_json::Value> = content_items
+                        .into_iter()
+                        .map(|item| {
+                            serde_json::json!({
+                                "type": item.content_type,
+                                "text": item.data
+                            })
+                        })
+                        .collect();
+                    (values, is_error, error_type)
+                })
+            }));
+        }
+
+        config
+    }
+
     /// Synchronously start the MCP server (blocks the current thread).
     ///
     /// Creates a new Tokio runtime and runs the server transport loop.
@@ -329,8 +399,7 @@ impl APCoreMCP {
             ));
         }
 
-        let (mut server, _router, tools, _init_options, version) =
-            self.build_server_components()?;
+        let (mut server, router, tools, _init_options, version) = self.build_server_components()?;
 
         tracing::info!(
             "Starting MCP server '{}' v{} with {} tools via {}",
@@ -347,6 +416,23 @@ impl APCoreMCP {
             on_startup();
         }
 
+        // Build optional explorer router for HTTP-based transports
+        let explorer_router = if opts.explorer && transport != "stdio" {
+            let explorer_config = self.build_explorer_config(
+                &tools,
+                &router,
+                &opts.explorer_prefix,
+                opts.allow_execute,
+                &opts.explorer_title,
+                opts.explorer_project_name.as_deref(),
+                opts.explorer_project_url.as_deref(),
+            );
+            tracing::info!("Explorer UI mounted at {}", opts.explorer_prefix);
+            Some(create_explorer_mount(explorer_config))
+        } else {
+            None
+        };
+
         let result = tokio::runtime::Runtime::new()
             .map_err(|e| APCoreMCPError::ServerError(e.to_string()))?
             .block_on(async {
@@ -358,6 +444,7 @@ impl APCoreMCP {
                     .wait()
                     .await
                     .map_err(|e| APCoreMCPError::ServerError(e.to_string()))?;
+                let _ = explorer_router; // Will be used when transport layer supports extra routes
                 Ok(())
             });
 
@@ -379,8 +466,7 @@ impl APCoreMCP {
             return Err(APCoreMCPError::InvalidExplorerPrefix);
         }
 
-        let (mut server, _router, tools, _init_options, version) =
-            self.build_server_components()?;
+        let (mut server, router, tools, _init_options, version) = self.build_server_components()?;
 
         tracing::info!(
             "Building MCP app '{}' v{} with {} tools",
@@ -401,7 +487,23 @@ impl APCoreMCP {
             .map_err(|e| APCoreMCPError::ServerError(e.to_string()))?;
 
         // Build health/metrics router from the transport manager
-        let app = transport_manager.health_metrics_router();
+        let mut app = transport_manager.health_metrics_router();
+
+        // Mount explorer if enabled
+        if opts.explorer {
+            let explorer_config = self.build_explorer_config(
+                &tools,
+                &router,
+                &opts.explorer_prefix,
+                opts.allow_execute,
+                &opts.explorer_title,
+                opts.explorer_project_name.as_deref(),
+                opts.explorer_project_url.as_deref(),
+            );
+            let explorer_router = create_explorer_mount(explorer_config);
+            app = app.merge(explorer_router);
+            tracing::info!("Explorer UI mounted at {}", opts.explorer_prefix);
+        }
 
         Ok(app)
     }
@@ -480,7 +582,6 @@ impl APCoreMCP {
 // ---- ServeOptions -----------------------------------------------------------
 
 /// Options for [`APCoreMCP::serve_with_options`].
-#[derive(Default)]
 pub struct ServeOptions {
     /// Callback invoked after setup, before the transport starts.
     pub on_startup: Option<Box<dyn Fn() + Send + Sync>>,
@@ -490,6 +591,29 @@ pub struct ServeOptions {
     pub explorer: bool,
     /// URL prefix for the explorer.
     pub explorer_prefix: String,
+    /// Page title shown in the explorer browser tab and heading.
+    pub explorer_title: String,
+    /// Optional project name shown in the explorer footer.
+    pub explorer_project_name: Option<String>,
+    /// Optional project URL linked in the explorer footer.
+    pub explorer_project_url: Option<String>,
+    /// Allow tool execution from the explorer UI.
+    pub allow_execute: bool,
+}
+
+impl Default for ServeOptions {
+    fn default() -> Self {
+        Self {
+            on_startup: None,
+            on_shutdown: None,
+            explorer: false,
+            explorer_prefix: "/explorer".to_string(),
+            explorer_title: "MCP Tool Explorer".to_string(),
+            explorer_project_name: None,
+            explorer_project_url: None,
+            allow_execute: false,
+        }
+    }
 }
 
 impl std::fmt::Debug for ServeOptions {
@@ -499,6 +623,10 @@ impl std::fmt::Debug for ServeOptions {
             .field("on_shutdown", &self.on_shutdown.as_ref().map(|_| "..."))
             .field("explorer", &self.explorer)
             .field("explorer_prefix", &self.explorer_prefix)
+            .field("explorer_title", &self.explorer_title)
+            .field("explorer_project_name", &self.explorer_project_name)
+            .field("explorer_project_url", &self.explorer_project_url)
+            .field("allow_execute", &self.allow_execute)
             .finish()
     }
 }
@@ -512,6 +640,14 @@ pub struct AsyncServeOptions {
     pub explorer: bool,
     /// URL prefix for the explorer.
     pub explorer_prefix: String,
+    /// Page title shown in the explorer browser tab and heading.
+    pub explorer_title: String,
+    /// Optional project name shown in the explorer footer.
+    pub explorer_project_name: Option<String>,
+    /// Optional project URL linked in the explorer footer.
+    pub explorer_project_url: Option<String>,
+    /// Allow tool execution from the explorer UI.
+    pub allow_execute: bool,
 }
 
 impl Default for AsyncServeOptions {
@@ -519,6 +655,10 @@ impl Default for AsyncServeOptions {
         Self {
             explorer: false,
             explorer_prefix: "/explorer".to_string(),
+            explorer_title: "MCP Tool Explorer".to_string(),
+            explorer_project_name: None,
+            explorer_project_url: None,
+            allow_execute: false,
         }
     }
 }
@@ -642,6 +782,30 @@ impl APCoreMCPBuilder {
     /// Set the explorer URL prefix.
     pub fn path_prefix(mut self, prefix: &str) -> Self {
         self.config.explorer_prefix = prefix.to_string();
+        self
+    }
+
+    /// Set the explorer page title.
+    pub fn explorer_title(mut self, title: &str) -> Self {
+        self.config.explorer_title = title.to_string();
+        self
+    }
+
+    /// Set the explorer project name.
+    pub fn explorer_project_name(mut self, name: &str) -> Self {
+        self.config.explorer_project_name = Some(name.to_string());
+        self
+    }
+
+    /// Set the explorer project URL.
+    pub fn explorer_project_url(mut self, url: &str) -> Self {
+        self.config.explorer_project_url = Some(url.to_string());
+        self
+    }
+
+    /// Set whether tool execution is allowed from the explorer UI.
+    pub fn allow_execute(mut self, allow: bool) -> Self {
+        self.config.allow_execute = allow;
         self
     }
 
@@ -1107,6 +1271,7 @@ mod tests {
         assert!(cfg.tags.is_none());
         assert!(cfg.prefix.is_none());
         assert!(cfg.require_auth);
+        assert!(!cfg.allow_execute);
     }
 
     #[test]
@@ -1114,6 +1279,10 @@ mod tests {
         let cfg = APCoreMCPConfig::default();
         assert!(!cfg.explorer);
         assert_eq!(cfg.explorer_prefix, "/explorer");
+        assert_eq!(cfg.explorer_title, "MCP Tool Explorer");
+        assert!(cfg.explorer_project_name.is_none());
+        assert!(cfg.explorer_project_url.is_none());
+        assert!(!cfg.allow_execute);
     }
 
     #[test]
@@ -1472,6 +1641,7 @@ mod tests {
             .async_serve(AsyncServeOptions {
                 explorer: true,
                 explorer_prefix: "no-slash".into(),
+                ..Default::default()
             })
             .await;
         assert!(matches!(result, Err(APCoreMCPError::InvalidExplorerPrefix)));

@@ -54,3 +54,7 @@ http-body-util = "0.1"
 [[bin]]
 name = "apcore-mcp"
 path = "src/bin/apcore-mcp.rs"
+
+[[example]]
+name = "run"
+path = "examples/run.rs"

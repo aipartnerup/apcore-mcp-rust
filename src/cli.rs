@@ -132,6 +132,18 @@ pub struct CliArgs {
     #[arg(long, default_value_t = false)]
     pub allow_execute: bool,
 
+    /// Page title shown in the explorer browser tab and heading.
+    #[arg(long, default_value = "MCP Tool Explorer")]
+    pub explorer_title: String,
+
+    /// Optional project name shown in the explorer footer.
+    #[arg(long)]
+    pub explorer_project_name: Option<String>,
+
+    /// Optional project URL linked in the explorer footer.
+    #[arg(long)]
+    pub explorer_project_url: Option<String>,
+
     /// JWT secret key for Bearer token authentication.
     #[arg(long, env = "APCORE_MCP_JWT_SECRET")]
     pub jwt_secret: Option<String>,
@@ -364,7 +376,17 @@ pub async fn run() -> Result<(), CliError> {
 
     builder = builder
         .include_explorer(args.explorer)
-        .path_prefix(&args.explorer_prefix);
+        .path_prefix(&args.explorer_prefix)
+        .explorer_title(&args.explorer_title)
+        .allow_execute(args.allow_execute);
+
+    if let Some(ref name) = args.explorer_project_name {
+        builder = builder.explorer_project_name(name);
+    }
+
+    if let Some(ref url) = args.explorer_project_url {
+        builder = builder.explorer_project_url(url);
+    }
 
     let mcp = builder
         .build()
@@ -534,6 +556,9 @@ mod tests {
         assert!(!args.explorer);
         assert_eq!(args.explorer_prefix, "/explorer");
         assert!(!args.allow_execute);
+        assert_eq!(args.explorer_title, "MCP Tool Explorer");
+        assert!(args.explorer_project_name.is_none());
+        assert!(args.explorer_project_url.is_none());
         assert!(args.jwt_secret.is_none());
         assert!(args.jwt_key_file.is_none());
         assert_eq!(args.jwt_algorithm, "HS256");
@@ -566,6 +591,12 @@ mod tests {
             "--explorer-prefix",
             "/tools",
             "--allow-execute",
+            "--explorer-title",
+            "My Custom Explorer",
+            "--explorer-project-name",
+            "My Project",
+            "--explorer-project-url",
+            "https://example.com",
             "--jwt-secret",
             "s3cret",
             "--jwt-algorithm",
@@ -595,6 +626,12 @@ mod tests {
         assert!(args.explorer);
         assert_eq!(args.explorer_prefix, "/tools");
         assert!(args.allow_execute);
+        assert_eq!(args.explorer_title, "My Custom Explorer");
+        assert_eq!(args.explorer_project_name.as_deref(), Some("My Project"));
+        assert_eq!(
+            args.explorer_project_url.as_deref(),
+            Some("https://example.com")
+        );
         assert_eq!(args.jwt_secret.as_deref(), Some("s3cret"));
         assert_eq!(args.jwt_algorithm, "RS256");
         assert_eq!(args.jwt_audience.as_deref(), Some("my-app"));
