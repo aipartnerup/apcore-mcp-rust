@@ -74,7 +74,7 @@ impl RegistryListener {
                             dependencies: vec![],
                         };
 
-                        match factory.build_tool(&descriptor, &description, None) {
+                        match factory.build_tool(&descriptor, &description, None, None) {
                             Ok(tool) => {
                                 if let Ok(mut map) = tools.write() {
                                     map.insert(module_id.to_string(), tool);

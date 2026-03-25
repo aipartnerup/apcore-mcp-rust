@@ -50,7 +50,7 @@ cargo add apcore-mcp
 cargo install apcore-mcp
 ```
 
-Requires Rust 1.75+ and `apcore >= 0.13.0`.
+Requires Rust 1.75+ and `apcore >= 0.14.0`.
 
 ## Quick Start
 
@@ -81,7 +81,7 @@ async fn main() -> anyhow::Result<()> {
         .build()?;
 
     // Launch as MCP Server
-    mcp.serve(Default::default())?;
+    mcp.serve()?;
 
     Ok(())
 }

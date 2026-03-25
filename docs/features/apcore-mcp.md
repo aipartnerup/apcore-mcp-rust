@@ -7,17 +7,17 @@ Provides the high-level unified API for creating and serving an MCP bridge from 
 
 ### APCoreMCP
 - Builder pattern construction with all configuration options
-- `serve(transport, host, port, on_startup, on_shutdown, explorer, ...)` — blocking serve
-- `async_serve(explorer, ...) -> AsyncIterator` — async context manager equivalent
+- `serve()` — blocking serve (takes no arguments; configuration is set via the builder)
+- `async_serve(config: AsyncServeConfig) -> AsyncIterator` — async context manager equivalent
 - `to_openai_tools(embed_annotations, strict) -> Vec<ToolDef>`
 - `registry() -> &Registry`
 - `executor() -> &Executor`
 - `tools() -> Vec<String>`
 
 ### Convenience Functions
-- `serve(registry_or_executor, transport, host, port, name, ...)` — one-shot serve
-- `async_serve(registry_or_executor, name, ...)` — one-shot async serve
-- `to_openai_tools(registry_or_executor, embed_annotations, strict, tags, prefix) -> Vec<ToolDef>`
+- `serve(backend: impl Into<BackendSource>, config: ServeConfig)` — one-shot serve
+- `async_serve(backend: impl Into<BackendSource>, config: AsyncServeConfig)` — one-shot async serve
+- `to_openai_tools(backend: impl Into<BackendSource>, config: OpenAIToolsConfig) -> Vec<ToolDef>`
 
 ## Acceptance Criteria
 - [ ] APCoreMCP accepts extensions_dir (Path) or backend (Registry/Executor)
