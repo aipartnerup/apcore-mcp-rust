@@ -57,10 +57,13 @@ pub fn resolve_executor(
             )))
         }
         BackendSource::Registry(_reg) => {
-            // Registry does not implement Clone, so we cannot move it out of Arc.
-            // Once we have discover() integration, this will create a fresh executor.
+            // Registry contains non-Clone fields (Box<dyn Module>, callbacks),
+            // so we cannot create an Executor from an Arc<Registry>.
+            // Use BackendSource::Executor instead.
             Err(APCoreMCPError::BackendResolution(
-                "cannot create Executor from Arc<Registry>: provide an Executor or ExtensionsDir source instead".to_string()
+                "cannot create Executor from Arc<Registry>: pass an Executor backend instead, \
+                 e.g. APCoreMCP::builder().backend(Arc::new(Executor::new(registry, config)))"
+                    .to_string(),
             ))
         }
         BackendSource::Executor(exec) => Ok(Arc::clone(exec)),

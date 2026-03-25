@@ -8,6 +8,8 @@
 
 use std::sync::Arc;
 
+use apcore::config::Config;
+use apcore::executor::Executor;
 use apcore::registry::registry::Registry;
 use apcore_mcp::{APCoreMCP, ServeOptions};
 
@@ -20,17 +22,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    // 1. Create a registry.
+    // 1. Create a registry and executor.
     //
     //    In a real application, you would register your own modules or use
     //    a discoverer to find them. For this example we start with an empty
     //    registry — the Explorer UI will show zero tools but still render.
-    let registry = Arc::new(Registry::new());
-    tracing::info!("Registry created (register your own modules to see tools)");
+    let registry = Registry::new();
+    let executor = Arc::new(Executor::new(registry, Config::default()));
+    tracing::info!("Executor created (register modules to see tools in Explorer)");
 
     // 2. Build the APCoreMCP bridge with explorer enabled.
     let mcp = APCoreMCP::builder()
-        .backend(registry)
+        .backend(executor)
         .name("apcore-mcp-examples")
         .transport("streamable-http")
         .host("127.0.0.1")
