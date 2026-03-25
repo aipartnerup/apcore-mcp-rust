@@ -207,10 +207,11 @@ const VALID_LOG_LEVELS: &[&str] = &["CRITICAL", "DEBUG", "ERROR", "INFO", "WARNI
 /// them as MCP tools over the configured transport.
 pub struct APCoreMCP {
     config: APCoreMCPConfig,
-    /// Standalone registry for tool discovery (used when backend is a
-    /// Registry). When backend is an Executor, this is None and tool
-    /// discovery uses `executor.registry`.
-    standalone_registry: Option<Arc<Registry>>,
+    /// The registry used for tool discovery.  When the backend is a
+    /// `Registry`, this is the user-supplied instance.  When the backend
+    /// is an `Executor`, this is a placeholder — internal tool discovery
+    /// goes through `executor.registry()` instead (see `reg()`).
+    registry: Arc<Registry>,
     executor: Arc<Executor>,
     /// Reserved — accepted by builder but not yet wired into the transport
     /// layer. Will be passed to `AuthMiddlewareLayer` once HTTP auth is
@@ -238,17 +239,22 @@ impl APCoreMCP {
 
     // -- Property accessors ---------------------------------------------------
 
-    /// Returns a reference to the registry used for tool discovery.
+    /// Internal helper — returns the registry to use for tool discovery.
+    /// Prefers the user-supplied registry; falls back to the executor's
+    /// internal registry when the user-supplied one is empty (Executor
+    /// backend).
     fn reg(&self) -> &Registry {
-        match &self.standalone_registry {
-            Some(reg) => reg,
-            None => self.executor.registry(),
+        if self.registry.list(None, None).is_empty() {
+            // Executor backend — user-supplied registry is a placeholder.
+            self.executor.registry()
+        } else {
+            &self.registry
         }
     }
 
     /// Returns a reference to the underlying registry.
-    pub fn registry(&self) -> &Registry {
-        self.reg()
+    pub fn registry(&self) -> &Arc<Registry> {
+        &self.registry
     }
 
     /// Returns a reference to the underlying executor.
@@ -865,7 +871,7 @@ impl APCoreMCPBuilder {
             APCoreMCPError::BackendResolution("backend source is required".to_string())
         })?;
 
-        let (standalone_registry, executor) = match backend {
+        let (registry, executor) = match backend {
             BackendSource::ExtensionsDir(path) => {
                 return Err(APCoreMCPError::BackendResolution(format!(
                     "ExtensionsDir resolution not yet implemented for path: {}",
@@ -873,25 +879,26 @@ impl APCoreMCPBuilder {
                 )));
             }
             BackendSource::Registry(reg) => {
-                // Registry backend: use the Arc<Registry> for tool discovery.
-                // Create a stub Executor (call routing returns errors since
-                // the Executor has an empty registry).
+                // Registry backend: Arc<Registry> for tool discovery.
+                // Stub Executor for call routing structure.
                 let exec = Arc::new(Executor::new(
                     Registry::new(),
                     apcore::config::Config::default(),
                 ));
-                (Some(reg), exec)
+                (reg, exec)
             }
             BackendSource::Executor(exec) => {
-                // Executor backend: tool discovery uses executor.registry().
-                // No standalone registry needed.
-                (None, exec)
+                // Executor backend: tool discovery uses executor.registry()
+                // via the reg() helper.  Store an empty placeholder so that
+                // the public registry() API always returns &Arc<Registry>.
+                let placeholder = Arc::new(Registry::new());
+                (placeholder, exec)
             }
         };
 
         Ok(APCoreMCP {
             config: self.config,
-            standalone_registry,
+            registry,
             executor,
             authenticator: self.authenticator,
             metrics_collector: self.metrics_collector,
@@ -1141,7 +1148,7 @@ mod tests {
         let executor = Arc::new(Executor::new(Registry::new(), Config::default()));
         APCoreMCP {
             config: APCoreMCPConfig::default(),
-            standalone_registry: Some(registry),
+            registry,
             executor,
             authenticator: None,
             metrics_collector: None,
@@ -1159,7 +1166,7 @@ mod tests {
                 version: Some(version.to_string()),
                 ..Default::default()
             },
-            standalone_registry: Some(registry),
+            registry,
             executor,
             authenticator: None,
             metrics_collector: None,
@@ -1185,7 +1192,7 @@ mod tests {
                 tags: Some(tags),
                 ..Default::default()
             },
-            standalone_registry: Some(registry),
+            registry,
             executor,
             authenticator: None,
             metrics_collector: None,
@@ -1207,7 +1214,7 @@ mod tests {
                 prefix: Some(prefix.to_string()),
                 ..Default::default()
             },
-            standalone_registry: Some(registry),
+            registry,
             executor,
             authenticator: None,
             metrics_collector: None,
@@ -1225,7 +1232,7 @@ mod tests {
         let executor = Arc::new(Executor::new(Registry::new(), Config::default()));
         APCoreMCP {
             config: APCoreMCPConfig::default(),
-            standalone_registry: Some(registry),
+            registry,
             executor,
             authenticator: None,
             metrics_collector: None,
@@ -1470,8 +1477,6 @@ mod tests {
             .backend(BackendSource::Registry(reg))
             .build();
         assert!(result.is_ok());
-        let mcp = result.unwrap();
-        assert!(mcp.standalone_registry.is_some());
     }
 
     #[test]
@@ -1481,9 +1486,9 @@ mod tests {
         let result = APCoreMCP::builder()
             .backend(BackendSource::Executor(exec))
             .build();
+        // Executor backend: stored registry is a placeholder (empty),
+        // tool discovery uses executor.registry() via reg().
         assert!(result.is_ok());
-        let mcp = result.unwrap();
-        assert!(mcp.standalone_registry.is_none());
     }
 
     // -- Struct and accessor tests (Task 5) -----------------------------------
@@ -1626,7 +1631,7 @@ mod tests {
                 transport: transport.to_string(),
                 ..Default::default()
             },
-            standalone_registry: Some(registry),
+            registry,
             executor,
             authenticator: None,
             metrics_collector: None,
