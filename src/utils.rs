@@ -15,6 +15,7 @@ use crate::apcore_mcp::{APCoreMCPError, BackendSource};
 /// - `ExtensionsDir`: not yet supported (requires discover integration).
 /// - `Registry`: returns the `Arc<Registry>` directly.
 /// - `Executor`: extracts the registry from the executor (cloned into a new Arc).
+#[allow(dead_code)]
 pub fn resolve_registry(source: &BackendSource) -> Result<Arc<Registry>, APCoreMCPError> {
     match source {
         BackendSource::ExtensionsDir(path) => {
@@ -44,6 +45,7 @@ pub fn resolve_registry(source: &BackendSource) -> Result<Arc<Registry>, APCoreM
 /// - `ExtensionsDir`: not yet supported (requires discover integration).
 /// - `Registry`: creates a new `Executor` from the registry (cloned).
 /// - `Executor`: returns the `Arc<Executor>` directly.
+#[allow(dead_code)]
 pub fn resolve_executor(
     source: &BackendSource,
     _approval_handler: Option<Box<dyn ApprovalHandler>>,

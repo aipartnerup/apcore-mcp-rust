@@ -22,7 +22,6 @@ use crate::server::router::{ExecutionRouter, OutputFormatter};
 use crate::server::server::MCPServer;
 use crate::server::transport::{MetricsExporter, TransportManager};
 use crate::server::types::{InitializationOptions, Tool};
-use crate::utils;
 
 // ---- BackendSource enum -----------------------------------------------------
 
@@ -208,7 +207,10 @@ const VALID_LOG_LEVELS: &[&str] = &["CRITICAL", "DEBUG", "ERROR", "INFO", "WARNI
 /// them as MCP tools over the configured transport.
 pub struct APCoreMCP {
     config: APCoreMCPConfig,
-    registry: Arc<Registry>,
+    /// Standalone registry for tool discovery (used when backend is a
+    /// Registry). When backend is an Executor, this is None and tool
+    /// discovery uses `executor.registry`.
+    standalone_registry: Option<Arc<Registry>>,
     executor: Arc<Executor>,
     /// Reserved — accepted by builder but not yet wired into the transport
     /// layer. Will be passed to `AuthMiddlewareLayer` once HTTP auth is
@@ -236,9 +238,17 @@ impl APCoreMCP {
 
     // -- Property accessors ---------------------------------------------------
 
+    /// Returns a reference to the registry used for tool discovery.
+    fn reg(&self) -> &Registry {
+        match &self.standalone_registry {
+            Some(reg) => reg,
+            None => self.executor.registry(),
+        }
+    }
+
     /// Returns a reference to the underlying registry.
-    pub fn registry(&self) -> &Arc<Registry> {
-        &self.registry
+    pub fn registry(&self) -> &Registry {
+        self.reg()
     }
 
     /// Returns a reference to the underlying executor.
@@ -256,7 +266,7 @@ impl APCoreMCP {
             .map(|t| t.iter().map(|s| s.as_str()).collect());
         let tags_slice: Option<&[&str]> = tags_refs.as_deref();
         let prefix = self.config.prefix.as_deref();
-        self.registry
+        self.reg()
             .list(tags_slice, prefix)
             .into_iter()
             .map(|s| s.to_string())
@@ -298,7 +308,7 @@ impl APCoreMCP {
             .map(|t| t.iter().map(|s| s.as_str()).collect());
         let tags_slice: Option<&[&str]> = tags_refs.as_deref();
         let prefix = self.config.prefix.as_deref();
-        let tools = factory.build_tools(&self.registry, tags_slice, prefix);
+        let tools = factory.build_tools(self.reg(), tags_slice, prefix);
 
         // Create execution router (stub for now since the adapter layer is not
         // yet wired). Once a real executor is available, output_formatter and
@@ -312,7 +322,7 @@ impl APCoreMCP {
         factory.register_handlers(&mut server, tools.clone(), Arc::clone(&router));
 
         // Register resource handlers
-        factory.register_resource_handlers(&mut server, &self.registry);
+        factory.register_resource_handlers(&mut server, self.reg());
 
         // Build init options
         let init_options = factory.build_init_options(&server, &self.config.name, &version);
@@ -548,12 +558,12 @@ impl APCoreMCP {
     ///
     /// Returns a JSON object `{ "module_id": { "description": "...", "input_schema": {...}, "annotations": {...}, "tags": [...] }, ... }`.
     fn build_registry_json(&self) -> Value {
-        let module_ids = self.registry.list(None, None);
+        let module_ids = self.reg().list(None, None);
         let mut map = serde_json::Map::new();
 
         for module_id in module_ids {
-            if let Some(descriptor) = self.registry.get_definition(module_id) {
-                let description = self.registry.describe(module_id);
+            if let Some(descriptor) = self.reg().get_definition(module_id) {
+                let description = self.reg().describe(module_id);
                 let annotations_json =
                     serde_json::to_value(&descriptor.annotations).unwrap_or(Value::Null);
                 let tags_json: Vec<Value> = descriptor
@@ -850,19 +860,38 @@ impl APCoreMCPBuilder {
             }
         }
 
-        // Resolve backend
+        // Resolve backend into (registry, executor) pair.
         let backend = self.backend.ok_or_else(|| {
             APCoreMCPError::BackendResolution("backend source is required".to_string())
         })?;
 
-        let registry = utils::resolve_registry(&backend)?;
-        // TODO: Pass approval_handler to resolve_executor once the executor
-        // pipeline supports injecting it post-construction.
-        let executor = utils::resolve_executor(&backend, None)?;
+        let (standalone_registry, executor) = match backend {
+            BackendSource::ExtensionsDir(path) => {
+                return Err(APCoreMCPError::BackendResolution(format!(
+                    "ExtensionsDir resolution not yet implemented for path: {}",
+                    path.display()
+                )));
+            }
+            BackendSource::Registry(reg) => {
+                // Registry backend: use the Arc<Registry> for tool discovery.
+                // Create a stub Executor (call routing returns errors since
+                // the Executor has an empty registry).
+                let exec = Arc::new(Executor::new(
+                    Registry::new(),
+                    apcore::config::Config::default(),
+                ));
+                (Some(reg), exec)
+            }
+            BackendSource::Executor(exec) => {
+                // Executor backend: tool discovery uses executor.registry().
+                // No standalone registry needed.
+                (None, exec)
+            }
+        };
 
         Ok(APCoreMCP {
             config: self.config,
-            registry,
+            standalone_registry,
             executor,
             authenticator: self.authenticator,
             metrics_collector: self.metrics_collector,
@@ -1112,7 +1141,7 @@ mod tests {
         let executor = Arc::new(Executor::new(Registry::new(), Config::default()));
         APCoreMCP {
             config: APCoreMCPConfig::default(),
-            registry,
+            standalone_registry: Some(registry),
             executor,
             authenticator: None,
             metrics_collector: None,
@@ -1130,7 +1159,7 @@ mod tests {
                 version: Some(version.to_string()),
                 ..Default::default()
             },
-            registry,
+            standalone_registry: Some(registry),
             executor,
             authenticator: None,
             metrics_collector: None,
@@ -1156,7 +1185,7 @@ mod tests {
                 tags: Some(tags),
                 ..Default::default()
             },
-            registry,
+            standalone_registry: Some(registry),
             executor,
             authenticator: None,
             metrics_collector: None,
@@ -1178,7 +1207,7 @@ mod tests {
                 prefix: Some(prefix.to_string()),
                 ..Default::default()
             },
-            registry,
+            standalone_registry: Some(registry),
             executor,
             authenticator: None,
             metrics_collector: None,
@@ -1196,7 +1225,7 @@ mod tests {
         let executor = Arc::new(Executor::new(Registry::new(), Config::default()));
         APCoreMCP {
             config: APCoreMCPConfig::default(),
-            registry,
+            standalone_registry: Some(registry),
             executor,
             authenticator: None,
             metrics_collector: None,
@@ -1440,12 +1469,9 @@ mod tests {
         let result = APCoreMCP::builder()
             .backend(BackendSource::Registry(reg))
             .build();
-        // Registry backend can't resolve executor, so it will fail
-        // But the validation passes
-        assert!(result.is_err());
-        if let Err(e) = &result {
-            assert!(matches!(e, APCoreMCPError::BackendResolution(_)));
-        }
+        assert!(result.is_ok());
+        let mcp = result.unwrap();
+        assert!(mcp.standalone_registry.is_some());
     }
 
     #[test]
@@ -1455,11 +1481,9 @@ mod tests {
         let result = APCoreMCP::builder()
             .backend(BackendSource::Executor(exec))
             .build();
-        // Executor backend can't resolve registry, so it will fail
-        assert!(result.is_err());
-        if let Err(e) = &result {
-            assert!(matches!(e, APCoreMCPError::BackendResolution(_)));
-        }
+        assert!(result.is_ok());
+        let mcp = result.unwrap();
+        assert!(mcp.standalone_registry.is_none());
     }
 
     // -- Struct and accessor tests (Task 5) -----------------------------------
@@ -1602,7 +1626,7 @@ mod tests {
                 transport: transport.to_string(),
                 ..Default::default()
             },
-            registry,
+            standalone_registry: Some(registry),
             executor,
             authenticator: None,
             metrics_collector: None,
