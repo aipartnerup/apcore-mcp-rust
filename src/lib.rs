@@ -17,7 +17,7 @@ pub mod server;
 mod utils;
 
 /// Crate version, kept in sync with Cargo.toml.
-pub const VERSION: &str = "0.10.1";
+pub const VERSION: &str = "0.11.0";
 
 // ---- Re-exports: core bridge ------------------------------------------------
 pub use crate::apcore_mcp::{

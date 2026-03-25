@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-03-25
+
+### Added
+- **Display overlay in `build_tool()`** — MCP tool name, description, and guidance now sourced from `metadata["display"]["mcp"]` when present.
+  - Tool name: `metadata["display"]["mcp"]["alias"]` (pre-sanitized by `DisplayResolver`, already `[a-zA-Z_][a-zA-Z0-9_-]*` and ≤ 64 chars).
+  - Tool description: `metadata["display"]["mcp"]["description"]`, with `guidance` appended as `\n\nGuidance: <text>` when set.
+  - Falls back to raw `descriptor.module_id` / `descriptor.description` when no display overlay is present.
+- `build_tool()` now accepts `name_override` parameter for display overlay tool names.
+- `build_tools_with_metadata()` method for resolving display overlay from module metadata.
+
+### Changed
+- Dependency recommendation: works best with `apcore-toolkit >= 0.4.0` for `DisplayResolver`.
+
+### Fixed
+- README: corrected `mcp.serve(Default::default())` to `mcp.serve()` (zero-argument method).
+- README: updated apcore version requirement from `>= 0.13.0` to `>= 0.14.0`.
+- docs/features: updated function signatures to use config structs (`ServeConfig`, `AsyncServeConfig`, `OpenAIToolsConfig`).
+
+### Tests
+- `TestBuildToolDisplayOverlay` (8 tests): MCP alias used as tool name, MCP description used, guidance appended to description, fallback when no overlay, fallback with empty metadata, name_override direct test, all fields combined.
+
 ## [0.10.1] - 2026-03-22
 
 ### Changed
@@ -44,3 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - `src/explorer/api.rs` — ExplorerState, API handlers, and CallResponse (replaced by `mcp-embedded-ui`).
 - `src/explorer/templates.rs` — HTML template rendering (replaced by `mcp-embedded-ui`).
+
+[0.11.0]: https://github.com/aiperceivable/apcore-mcp-rust/compare/v0.10.1...v0.11.0
+[0.10.1]: https://github.com/aiperceivable/apcore-mcp-rust/compare/v0.10.0...v0.10.1
+[0.10.0]: https://github.com/aiperceivable/apcore-mcp-rust/releases/tag/v0.10.0
