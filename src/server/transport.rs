@@ -5,7 +5,8 @@
 use std::convert::Infallible;
 use std::sync::Arc;
 
-use axum::response::IntoResponse;
+use axum::extract::Request;
+use axum::response::{IntoResponse, Redirect};
 use axum::routing::{get, post};
 use axum::Router;
 use hyper::StatusCode;
@@ -240,6 +241,10 @@ impl TransportManager {
         if let Some(extra) = extra_routes {
             app = app.merge(extra);
         }
+
+        // Axum's nest() does not match trailing slashes.  Add a fallback
+        // redirect so that e.g. /explorer/ redirects to /explorer.
+        app = app.fallback(trailing_slash_redirect);
 
         app
     }
@@ -489,6 +494,21 @@ async fn sse_messages_handler(
     match state.sender.send(body).await {
         Ok(()) => StatusCode::ACCEPTED,
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// Fallback handler that strips a trailing slash and redirects.
+///
+/// Axum's `nest("/prefix", ...)` matches `/prefix` but not `/prefix/`.
+/// This fallback redirects `/prefix/` → `/prefix` so both work.
+/// Non-trailing-slash paths that don't match any route get a 404.
+async fn trailing_slash_redirect(req: Request) -> axum::response::Response {
+    let path = req.uri().path();
+    if path.len() > 1 && path.ends_with('/') {
+        let trimmed = path.trim_end_matches('/');
+        Redirect::permanent(trimmed).into_response()
+    } else {
+        axum::http::StatusCode::NOT_FOUND.into_response()
     }
 }
 
