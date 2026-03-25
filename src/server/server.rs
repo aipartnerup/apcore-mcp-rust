@@ -14,7 +14,9 @@ use serde_json::Value;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use crate::server::types::{CallToolResult, ReadResourceContents, Resource, Tool};
+use crate::server::types::{
+    CallToolResult, InitializationOptions, ReadResourceContents, Resource, Tool,
+};
 
 // ---------------------------------------------------------------------------
 // TransportKind
@@ -391,6 +393,168 @@ impl MCPServer {
         self.config
             .transport
             .address(&self.config.host, self.config.port)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// McpHandler implementation — bridges MCPServer handlers to the transport layer
+// ---------------------------------------------------------------------------
+
+/// Wraps the MCPServer's tool handlers so the transport layer can dispatch
+/// JSON-RPC messages through them.
+pub struct ServerHandler {
+    list_tools: Arc<dyn Fn() -> Vec<Tool> + Send + Sync>,
+    call_tool: CallToolHandler,
+    list_resources: Option<Arc<dyn Fn() -> Vec<Resource> + Send + Sync>>,
+    read_resource: Option<ReadResourceHandler>,
+    init_options: InitializationOptions,
+}
+
+impl ServerHandler {
+    /// Build a [`ServerHandler`] from an [`MCPServer`] that has handlers registered.
+    ///
+    /// Returns `None` if the server has no tool handlers.
+    pub fn from_server(server: &MCPServer, init_options: InitializationOptions) -> Option<Self> {
+        let list_tools = server.list_tools_handler.clone()?;
+        let call_tool = server.call_tool_handler.clone()?;
+        Some(Self {
+            list_tools,
+            call_tool,
+            list_resources: server.list_resources_handler.clone(),
+            read_resource: server.read_resource_handler.clone(),
+            init_options,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::server::transport::McpHandler for ServerHandler {
+    async fn handle_message(&self, message: Value) -> Option<Value> {
+        let method = message.get("method")?.as_str()?;
+        let id = message.get("id").cloned();
+
+        let result = match method {
+            "initialize" => {
+                let caps = serde_json::json!({
+                    "capabilities": {
+                        "tools": { "listChanged": true },
+                        "resources": { "listChanged": false }
+                    },
+                    "serverInfo": {
+                        "name": self.init_options.server_name,
+                        "version": self.init_options.server_version
+                    },
+                    "protocolVersion": "2025-03-26"
+                });
+                Some(caps)
+            }
+            "tools/list" => {
+                let tools = (self.list_tools)();
+                let tools_json: Vec<Value> = tools
+                    .iter()
+                    .map(|t| {
+                        let mut obj = serde_json::json!({
+                            "name": t.name,
+                            "description": t.description,
+                            "inputSchema": t.input_schema,
+                        });
+                        if let Some(ref ann) = t.annotations {
+                            obj["annotations"] = serde_json::to_value(ann).unwrap_or_default();
+                        }
+                        obj
+                    })
+                    .collect();
+                Some(serde_json::json!({ "tools": tools_json }))
+            }
+            "tools/call" => {
+                let params = message.get("params")?;
+                let name = params.get("name")?.as_str()?.to_string();
+                let arguments = params
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or(Value::Object(Default::default()));
+                let extra = params.get("_meta").cloned();
+                let call_result = (self.call_tool)(name, arguments, extra).await;
+                let content: Vec<Value> = call_result
+                    .content
+                    .iter()
+                    .map(|c| {
+                        serde_json::json!({
+                            "type": c.content_type,
+                            "text": c.text
+                        })
+                    })
+                    .collect();
+                Some(serde_json::json!({
+                    "content": content,
+                    "isError": call_result.is_error
+                }))
+            }
+            "resources/list" => {
+                if let Some(ref handler) = self.list_resources {
+                    let resources = handler();
+                    let resources_json: Vec<Value> = resources
+                        .iter()
+                        .map(|r| {
+                            serde_json::json!({
+                                "uri": r.uri,
+                                "name": r.name,
+                                "mimeType": r.mime_type
+                            })
+                        })
+                        .collect();
+                    Some(serde_json::json!({ "resources": resources_json }))
+                } else {
+                    Some(serde_json::json!({ "resources": [] }))
+                }
+            }
+            "resources/read" => {
+                let params = message.get("params")?;
+                let uri = params.get("uri")?.as_str()?.to_string();
+                if let Some(ref handler) = self.read_resource {
+                    match handler(uri) {
+                        Ok(contents) => {
+                            let contents_json: Vec<Value> = contents
+                                .iter()
+                                .map(|c| {
+                                    serde_json::json!({
+                                        "content": c.content,
+                                        "mimeType": c.mime_type
+                                    })
+                                })
+                                .collect();
+                            Some(serde_json::json!({ "contents": contents_json }))
+                        }
+                        Err(e) => Some(serde_json::json!({
+                            "error": { "code": -32602, "message": e.to_string() }
+                        })),
+                    }
+                } else {
+                    Some(serde_json::json!({
+                        "error": { "code": -32601, "message": "resources not supported" }
+                    }))
+                }
+            }
+            "notifications/initialized" | "notifications/cancelled" => None,
+            _ => Some(serde_json::json!({
+                "error": { "code": -32601, "message": format!("unknown method: {method}") }
+            })),
+        };
+
+        // Wrap in JSON-RPC response if request had an id
+        match (id, result) {
+            (Some(id), Some(res)) => Some(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": res
+            })),
+            (Some(id), None) => Some(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {}
+            })),
+            (None, _) => None, // notification — no response
+        }
     }
 }
 

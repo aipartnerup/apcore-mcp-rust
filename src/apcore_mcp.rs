@@ -19,7 +19,7 @@ use crate::converters::openai::OpenAIConverter;
 use crate::explorer::{create_explorer_mount, ExplorerConfig, ToolInfo};
 use crate::server::factory::MCPServerFactory;
 use crate::server::router::{ExecutionRouter, OutputFormatter};
-use crate::server::server::MCPServer;
+use crate::server::server::{MCPServer, ServerHandler};
 use crate::server::transport::{MetricsExporter, TransportManager};
 use crate::server::types::{InitializationOptions, Tool};
 
@@ -413,8 +413,7 @@ impl APCoreMCP {
             ));
         }
 
-        let (mut server, _router, tools, _init_options, version) =
-            self.build_server_components()?;
+        let (server, router, tools, init_options, version) = self.build_server_components()?;
 
         tracing::info!(
             "Starting MCP server '{}' v{} with {} tools via {}",
@@ -426,33 +425,66 @@ impl APCoreMCP {
 
         let mut transport_manager = TransportManager::new(self.metrics_collector.clone());
         transport_manager.set_module_count(tools.len());
+        let transport_manager = Arc::new(transport_manager);
+
+        // Build the McpHandler from the server's registered handlers.
+        let handler: Arc<dyn crate::server::transport::McpHandler> = Arc::new(
+            ServerHandler::from_server(&server, init_options)
+                .ok_or_else(|| APCoreMCPError::ServerError("no tool handlers registered".into()))?,
+        );
+
+        // Build explorer router if enabled on HTTP transport.
+        let explorer_router = if opts.explorer && transport != "stdio" {
+            let explorer_config = self.build_explorer_config(
+                &tools,
+                &router,
+                &opts.explorer_prefix,
+                opts.allow_execute,
+                &opts.explorer_title,
+                opts.explorer_project_name.as_deref(),
+                opts.explorer_project_url.as_deref(),
+            );
+            tracing::info!("Explorer UI mounted at {}", opts.explorer_prefix);
+            Some(create_explorer_mount(explorer_config))
+        } else {
+            None
+        };
 
         if let Some(ref on_startup) = opts.on_startup {
             on_startup();
         }
 
-        // Explorer in blocking serve() is not yet supported because the
-        // MCPServer transport loop does not accept extra routes.  Use
-        // async_serve() for explorer support on HTTP transports.
-        if opts.explorer && transport != "stdio" {
-            tracing::warn!(
-                "Explorer UI requested but not yet supported in blocking serve(). \
-                 Use async_serve() for explorer support on HTTP transports."
-            );
-        }
-
         let result = tokio::runtime::Runtime::new()
             .map_err(|e| APCoreMCPError::ServerError(e.to_string()))?
             .block_on(async {
-                server
-                    .start()
-                    .await
-                    .map_err(|e| APCoreMCPError::ServerError(e.to_string()))?;
-                server
-                    .wait()
-                    .await
-                    .map_err(|e| APCoreMCPError::ServerError(e.to_string()))?;
-                Ok(())
+                match transport.as_str() {
+                    "streamable-http" => transport_manager
+                        .run_streamable_http(
+                            Arc::clone(&handler),
+                            &self.config.host,
+                            self.config.port,
+                            explorer_router,
+                        )
+                        .await
+                        .map_err(|e| APCoreMCPError::ServerError(e.to_string())),
+                    #[allow(deprecated)]
+                    "sse" => transport_manager
+                        .run_sse(
+                            Arc::clone(&handler),
+                            &self.config.host,
+                            self.config.port,
+                            explorer_router,
+                        )
+                        .await
+                        .map_err(|e| APCoreMCPError::ServerError(e.to_string())),
+                    _ => {
+                        // stdio
+                        transport_manager
+                            .run_stdio(&*handler)
+                            .await
+                            .map_err(|e| APCoreMCPError::ServerError(e.to_string()))
+                    }
+                }
             });
 
         if let Some(ref on_shutdown) = opts.on_shutdown {
