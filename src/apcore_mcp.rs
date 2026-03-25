@@ -189,9 +189,11 @@ impl Default for APCoreMCPConfig {
             exempt_paths: None,
             explorer: false,
             explorer_prefix: "/explorer".to_string(),
-            explorer_title: "MCP Tool Explorer".to_string(),
-            explorer_project_name: None,
-            explorer_project_url: None,
+            explorer_title: "APCore MCP Explorer".to_string(),
+            explorer_project_name: Some("apcore-mcp".to_string()),
+            explorer_project_url: Some(
+                "https://github.com/aiperceivable/apcore-mcp-rust".to_string(),
+            ),
             allow_execute: false,
         }
     }
@@ -1336,9 +1338,12 @@ mod tests {
         let cfg = APCoreMCPConfig::default();
         assert!(!cfg.explorer);
         assert_eq!(cfg.explorer_prefix, "/explorer");
-        assert_eq!(cfg.explorer_title, "MCP Tool Explorer");
-        assert!(cfg.explorer_project_name.is_none());
-        assert!(cfg.explorer_project_url.is_none());
+        assert_eq!(cfg.explorer_title, "APCore MCP Explorer");
+        assert_eq!(cfg.explorer_project_name.as_deref(), Some("apcore-mcp"));
+        assert_eq!(
+            cfg.explorer_project_url.as_deref(),
+            Some("https://github.com/aiperceivable/apcore-mcp-rust")
+        );
         assert!(!cfg.allow_execute);
     }
 
