@@ -3,8 +3,6 @@
 //! Responsible for building tools from registry descriptors, registering
 //! handlers, and producing a ready-to-run MCPServer.
 
-#![allow(unused)]
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -141,7 +139,9 @@ impl ToolAnnotationBuilder {
 
 /// Factory for constructing [`MCPServer`] instances from a registry and executor.
 pub struct MCPServerFactory {
+    #[allow(dead_code)]
     schema_converter: SchemaConverter,
+    #[allow(dead_code)]
     annotation_mapper: AnnotationMapper,
 }
 
@@ -165,7 +165,7 @@ impl MCPServerFactory {
     /// # Arguments
     /// * `name` - Server name advertised in MCP init.
     /// * `version` - Server version string (used in init options, not stored on server).
-    pub fn create_server(&self, name: &str, version: &str) -> MCPServer {
+    pub fn create_server(&self, name: &str, _version: &str) -> MCPServer {
         MCPServer::new(MCPServerConfig {
             name: name.to_string(),
             ..Default::default()
@@ -464,6 +464,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     fn make_descriptor_with_tags(name: &str, tags: Vec<String>) -> ModuleDescriptor {
         ModuleDescriptor {
             name: name.to_string(),

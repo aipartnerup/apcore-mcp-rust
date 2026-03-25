@@ -2,12 +2,9 @@
 //!
 //! These are not part of the public API.
 
-#![allow(unused)]
-
 use std::sync::Arc;
 
 use apcore::approval::ApprovalHandler;
-use apcore::config::Config;
 use apcore::executor::Executor;
 use apcore::registry::registry::Registry;
 
@@ -29,7 +26,7 @@ pub fn resolve_registry(source: &BackendSource) -> Result<Arc<Registry>, APCoreM
             )))
         }
         BackendSource::Registry(reg) => Ok(Arc::clone(reg)),
-        BackendSource::Executor(exec) => {
+        BackendSource::Executor(_exec) => {
             // The Executor holds a Registry by value. We need to return an Arc<Registry>.
             // Since we cannot move it out, we return an error directing users to provide
             // a Registry directly, or we clone if Registry implements Clone.
@@ -49,7 +46,7 @@ pub fn resolve_registry(source: &BackendSource) -> Result<Arc<Registry>, APCoreM
 /// - `Executor`: returns the `Arc<Executor>` directly.
 pub fn resolve_executor(
     source: &BackendSource,
-    approval_handler: Option<Box<dyn ApprovalHandler>>,
+    _approval_handler: Option<Box<dyn ApprovalHandler>>,
 ) -> Result<Arc<Executor>, APCoreMCPError> {
     match source {
         BackendSource::ExtensionsDir(path) => {
@@ -73,6 +70,7 @@ pub fn resolve_executor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use apcore::config::Config;
     use std::path::PathBuf;
     use std::sync::Arc;
 

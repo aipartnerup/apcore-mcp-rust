@@ -2,8 +2,6 @@
 //!
 //! Handles argument validation, execution dispatch, and output formatting.
 
-#![allow(unused)]
-
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -571,7 +569,7 @@ impl ExecutionRouter {
     fn build_error_text(error: &ExecutorError) -> String {
         match error {
             ExecutorError::Execution {
-                code,
+                code: _,
                 message,
                 details,
             } => {
@@ -1122,6 +1120,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     struct FailingSession;
 
     #[async_trait]
@@ -2205,6 +2204,7 @@ mod tests {
             self
         }
 
+        #[allow(dead_code)]
         fn call_count(&self) -> usize {
             self.calls.lock().unwrap().len()
         }
@@ -2330,7 +2330,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_e2e_call_with_identity() {
-        let executor = ConfigurableExecutor::new();
+        let _executor = ConfigurableExecutor::new();
         let router = ExecutionRouter::new(Box::new(IdentityCapturingExecutor), false, None);
         let extra = CallExtra {
             progress_token: None,

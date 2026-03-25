@@ -210,15 +210,20 @@ pub struct APCoreMCP {
     config: APCoreMCPConfig,
     registry: Arc<Registry>,
     executor: Arc<Executor>,
+    /// Reserved — accepted by builder but not yet wired into the transport
+    /// layer. Will be passed to `AuthMiddlewareLayer` once HTTP auth is
+    /// integrated into `serve()`.
     #[allow(dead_code)]
     authenticator: Option<Arc<dyn Authenticator>>,
     metrics_collector: Option<Arc<dyn MetricsExporter>>,
-    // TODO: Pass to ExecutionRouter::new_with_formatter once a real executor
-    // is wired (requires converting to Arc<dyn Fn> or taking &mut self).
+    /// Reserved — accepted by builder but not yet passed to
+    /// `ExecutionRouter::new_with_formatter` (requires converting to
+    /// `Arc<dyn Fn>` or taking `&mut self`).
     #[allow(dead_code)]
     output_formatter: Option<OutputFormatter>,
-    // TODO: Pass to resolve_executor once the executor pipeline supports
-    // injecting approval handlers post-construction.
+    /// Reserved — accepted by builder but not yet passed to the executor
+    /// pipeline (requires `resolve_executor` to support post-construction
+    /// injection).
     #[allow(dead_code)]
     approval_handler: Option<Arc<dyn ApprovalHandler>>,
 }
@@ -399,7 +404,8 @@ impl APCoreMCP {
             ));
         }
 
-        let (mut server, router, tools, _init_options, version) = self.build_server_components()?;
+        let (mut server, _router, tools, _init_options, version) =
+            self.build_server_components()?;
 
         tracing::info!(
             "Starting MCP server '{}' v{} with {} tools via {}",
@@ -416,22 +422,15 @@ impl APCoreMCP {
             on_startup();
         }
 
-        // Build optional explorer router for HTTP-based transports
-        let explorer_router = if opts.explorer && transport != "stdio" {
-            let explorer_config = self.build_explorer_config(
-                &tools,
-                &router,
-                &opts.explorer_prefix,
-                opts.allow_execute,
-                &opts.explorer_title,
-                opts.explorer_project_name.as_deref(),
-                opts.explorer_project_url.as_deref(),
+        // Explorer in blocking serve() is not yet supported because the
+        // MCPServer transport loop does not accept extra routes.  Use
+        // async_serve() for explorer support on HTTP transports.
+        if opts.explorer && transport != "stdio" {
+            tracing::warn!(
+                "Explorer UI requested but not yet supported in blocking serve(). \
+                 Use async_serve() for explorer support on HTTP transports."
             );
-            tracing::info!("Explorer UI mounted at {}", opts.explorer_prefix);
-            Some(create_explorer_mount(explorer_config))
-        } else {
-            None
-        };
+        }
 
         let result = tokio::runtime::Runtime::new()
             .map_err(|e| APCoreMCPError::ServerError(e.to_string()))?
@@ -444,7 +443,6 @@ impl APCoreMCP {
                     .wait()
                     .await
                     .map_err(|e| APCoreMCPError::ServerError(e.to_string()))?;
-                let _ = explorer_router; // Will be used when transport layer supports extra routes
                 Ok(())
             });
 
@@ -744,6 +742,8 @@ impl APCoreMCPBuilder {
     }
 
     /// Set the authenticator.
+    ///
+    /// **Note:** Reserved — not yet wired into the transport layer.
     pub fn authenticator<A: Authenticator + 'static>(mut self, auth: A) -> Self {
         self.authenticator = Some(Arc::new(auth));
         self
@@ -756,12 +756,16 @@ impl APCoreMCPBuilder {
     }
 
     /// Set the output formatter.
+    ///
+    /// **Note:** Reserved — not yet wired into the execution router.
     pub fn output_formatter(mut self, formatter: OutputFormatter) -> Self {
         self.output_formatter = Some(formatter);
         self
     }
 
     /// Set the approval handler.
+    ///
+    /// **Note:** Reserved — not yet wired into the executor pipeline.
     pub fn approval_handler(mut self, handler: Arc<dyn ApprovalHandler>) -> Self {
         self.approval_handler = Some(handler);
         self
