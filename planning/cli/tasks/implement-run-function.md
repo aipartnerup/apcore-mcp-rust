@@ -24,7 +24,7 @@ Implement the `run()` function that ties together argument parsing, validation, 
    - Else if `args.jwt_secret` is `Some(secret)`:
      - Return secret.
    - Else:
-     - Return `std::env::var("JWT_SECRET").ok()`.
+     - Return `std::env::var("APCORE_JWT_SECRET").ok()`.
 3. **Implement `parse_exempt_paths(s: &str) -> HashSet<String>`:**
    - Split by `,`, trim each, collect into HashSet.
 4. **Implement `validate_args(args: &CliArgs) -> Result<(), CliError>`:**

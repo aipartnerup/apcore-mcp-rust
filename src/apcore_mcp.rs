@@ -492,22 +492,28 @@ impl APCoreMCP {
             .map_err(|e| APCoreMCPError::ServerError(e.to_string()))?
             .block_on(async {
                 match transport.as_str() {
-                    "streamable-http" => transport_manager
-                        .run_streamable_http_with_auth(
-                            Arc::clone(&handler),
-                            &self.config.host,
-                            self.config.port,
-                            explorer_router,
-                            self.authenticator.clone(),
-                            self.config.require_auth,
-                            if opts.explorer.explorer {
-                                Some(opts.explorer.explorer_prefix.as_str())
-                            } else {
-                                None
-                            },
-                        )
-                        .await
-                        .map_err(|e| APCoreMCPError::ServerError(e.to_string())),
+                    "streamable-http" => {
+                        use crate::server::transport::HttpAuthConfig;
+                        transport_manager
+                            .run_streamable_http_with_auth(
+                                Arc::clone(&handler),
+                                &self.config.host,
+                                self.config.port,
+                                explorer_router,
+                                HttpAuthConfig {
+                                    authenticator: self.authenticator.clone(),
+                                    require_auth: self.config.require_auth,
+                                    explorer_prefix: if opts.explorer.explorer {
+                                        Some(opts.explorer.explorer_prefix.clone())
+                                    } else {
+                                        None
+                                    },
+                                    exempt_paths: self.config.exempt_paths.clone(),
+                                },
+                            )
+                            .await
+                            .map_err(|e| APCoreMCPError::ServerError(e.to_string()))
+                    }
                     #[allow(deprecated)]
                     "sse" => {
                         if self.authenticator.is_some() {

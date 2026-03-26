@@ -37,7 +37,7 @@ Write comprehensive unit tests for all CLI components: enum parsing, argument pa
    - With `jwt_key_file` pointing to a valid file — returns file contents.
    - With `jwt_key_file` pointing to non-existent file — returns error.
    - With `jwt_secret` set (no file) — returns secret string.
-   - With `JWT_SECRET` env var set (no file, no secret) — returns env value.
+   - With `APCORE_JWT_SECRET` env var set (no file, no secret) — returns env value.
    - With nothing set — returns `None`.
    - Priority: file overrides secret, secret overrides env.
 

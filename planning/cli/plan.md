@@ -32,7 +32,7 @@ init_tracing(log_level)
   |
   v
 resolve_jwt_key()
-  |-- --jwt-key-file > --jwt-secret > JWT_SECRET env
+  |-- --jwt-key-file > --jwt-secret > APCORE_JWT_SECRET env
   |-- build JWTAuthenticator if key found
   |
   v
@@ -120,7 +120,7 @@ graph TD
 ## Acceptance Criteria
 
 - [ ] All CLI args match the feature spec / Python implementation
-- [ ] JWT key resolution: --jwt-key-file > --jwt-secret > JWT_SECRET env
+- [ ] JWT key resolution: --jwt-key-file > --jwt-secret > APCORE_JWT_SECRET env
 - [ ] Exit codes: 0=normal, 1=invalid args, 2=startup failure
 - [ ] Configures tracing subscriber based on --log-level
 - [ ] Approval mode selection creates correct handler

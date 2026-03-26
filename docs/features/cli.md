@@ -16,7 +16,7 @@ Command-line interface for starting the apcore-mcp server. Parses arguments via 
 - `--explorer` (flag)
 - `--explorer-prefix` (default: /explorer)
 - `--allow-execute` (flag)
-- `--jwt-secret` / `--jwt-key-file` / env JWT_SECRET
+- `--jwt-secret` / `--jwt-key-file` / env APCORE_JWT_SECRET
 - `--jwt-algorithm` (default: HS256)
 - `--jwt-audience`, `--jwt-issuer`
 - `--jwt-require-auth` / `--no-jwt-require-auth` (default: true)
@@ -28,7 +28,7 @@ Command-line interface for starting the apcore-mcp server. Parses arguments via 
 
 ## Acceptance Criteria
 - [ ] All CLI args match Python implementation
-- [ ] JWT key resolution: --jwt-key-file > --jwt-secret > JWT_SECRET env
+- [ ] JWT key resolution: --jwt-key-file > --jwt-secret > APCORE_JWT_SECRET env
 - [ ] Exit codes: 0=normal, 1=invalid args, 2=startup failure
 - [ ] Configures tracing subscriber based on --log-level
 - [ ] Approval mode selection creates correct handler

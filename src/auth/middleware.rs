@@ -177,7 +177,7 @@ where
             let is_get_exempt = method == axum::http::Method::GET
                 && exempt_get_prefixes
                     .iter()
-                    .any(|prefix| path == *prefix || path.starts_with(prefix));
+                    .any(|prefix| path.starts_with(prefix.as_str()));
 
             let headers = extract_headers(&req);
 
@@ -573,5 +573,69 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"], "Unauthorized");
         assert_eq!(json["detail"], "Missing or invalid Bearer token");
+    }
+
+    // ---- exempt_get_prefixes ----
+
+    #[tokio::test]
+    async fn get_exempt_prefix_allows_get_without_auth() {
+        let auth: Arc<dyn Authenticator> = Arc::new(RejectAuthenticator);
+        let layer = AuthMiddlewareLayer::new(auth)
+            .exempt_get_prefixes(vec!["/explorer".to_string(), "/explorer/".to_string()]);
+        let svc = make_service_with_layer(layer);
+
+        let req = Request::get("/explorer/tools").body(Body::empty()).unwrap();
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn get_exempt_prefix_blocks_post_without_auth() {
+        let auth: Arc<dyn Authenticator> = Arc::new(RejectAuthenticator);
+        let layer = AuthMiddlewareLayer::new(auth)
+            .exempt_get_prefixes(vec!["/explorer".to_string(), "/explorer/".to_string()]);
+        let svc = make_service_with_layer(layer);
+
+        let req = Request::post("/explorer/tools/echo/call")
+            .body(Body::empty())
+            .unwrap();
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn get_exempt_prefix_exact_match_allows_get() {
+        let auth: Arc<dyn Authenticator> = Arc::new(RejectAuthenticator);
+        let layer =
+            AuthMiddlewareLayer::new(auth).exempt_get_prefixes(vec!["/explorer".to_string()]);
+        let svc = make_service_with_layer(layer);
+
+        let req = Request::get("/explorer").body(Body::empty()).unwrap();
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn get_exempt_prefix_does_not_match_other_paths() {
+        let auth: Arc<dyn Authenticator> = Arc::new(RejectAuthenticator);
+        let layer =
+            AuthMiddlewareLayer::new(auth).exempt_get_prefixes(vec!["/explorer".to_string()]);
+        let svc = make_service_with_layer(layer);
+
+        let req = Request::get("/api/data").body(Body::empty()).unwrap();
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn get_exempt_prefix_post_to_exact_prefix_requires_auth() {
+        let auth: Arc<dyn Authenticator> = Arc::new(RejectAuthenticator);
+        let layer =
+            AuthMiddlewareLayer::new(auth).exempt_get_prefixes(vec!["/explorer".to_string()]);
+        let svc = make_service_with_layer(layer);
+
+        let req = Request::post("/explorer").body(Body::empty()).unwrap();
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }

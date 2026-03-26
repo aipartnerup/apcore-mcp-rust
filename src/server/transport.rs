@@ -68,6 +68,23 @@ pub trait McpHandler: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// HttpAuthConfig
+// ---------------------------------------------------------------------------
+
+/// Authentication configuration for HTTP transports.
+#[derive(Default)]
+pub struct HttpAuthConfig {
+    /// Optional authenticator. When `None`, no auth middleware is applied.
+    pub authenticator: Option<Arc<dyn crate::auth::protocol::Authenticator>>,
+    /// Whether unauthenticated requests are rejected (`true`) or allowed (`false`).
+    pub require_auth: bool,
+    /// Explorer URL prefix for GET-only exemption (browsing exempt, POST requires auth).
+    pub explorer_prefix: Option<String>,
+    /// User-configured paths that bypass authentication entirely.
+    pub exempt_paths: Option<std::collections::HashSet<String>>,
+}
+
+// ---------------------------------------------------------------------------
 // Task 2: TransportManager struct
 // ---------------------------------------------------------------------------
 
@@ -263,25 +280,29 @@ impl TransportManager {
         port: u16,
         extra_routes: Option<Router>,
     ) -> Result<(), TransportError> {
-        self.run_streamable_http_with_auth(handler, host, port, extra_routes, None, false, None)
-            .await
+        self.run_streamable_http_with_auth(
+            handler,
+            host,
+            port,
+            extra_routes,
+            HttpAuthConfig::default(),
+        )
+        .await
     }
 
     /// Run the MCP server over streamable-HTTP transport with optional authentication.
     ///
-    /// When an `authenticator` is provided, requests are authenticated via the
-    /// existing [`AuthMiddlewareLayer`](crate::auth::middleware::AuthMiddlewareLayer)
-    /// which handles exempt paths, `require_auth` flag, and identity propagation.
-    #[allow(clippy::too_many_arguments)]
+    /// When `auth_config.authenticator` is provided, requests are authenticated
+    /// via [`AuthMiddlewareLayer`](crate::auth::middleware::AuthMiddlewareLayer)
+    /// which handles exempt paths, GET-only exemptions, `require_auth` flag,
+    /// and identity propagation via task-local.
     pub async fn run_streamable_http_with_auth(
         self: &Arc<Self>,
         handler: Arc<dyn McpHandler>,
         host: &str,
         port: u16,
         extra_routes: Option<Router>,
-        authenticator: Option<Arc<dyn crate::auth::protocol::Authenticator>>,
-        require_auth: bool,
-        explorer_prefix: Option<&str>,
+        auth_config: HttpAuthConfig,
     ) -> Result<(), TransportError> {
         Self::validate_host_port(host, port)?;
         tracing::info!("Starting streamable-http transport on {}:{}", host, port);
@@ -289,21 +310,29 @@ impl TransportManager {
         let app = self.build_streamable_http_app(handler, extra_routes);
 
         // Apply auth middleware if an authenticator is provided.
-        let app = if let Some(auth) = authenticator {
+        let app = if let Some(auth) = auth_config.authenticator {
             use crate::auth::middleware::AuthMiddlewareLayer;
 
             // Explorer browsing (GET) is exempt; execution (POST) requires auth.
             let mut get_prefixes = Vec::new();
-            if let Some(prefix) = explorer_prefix {
-                get_prefixes.push(prefix.to_string());
+            if let Some(prefix) = auth_config.explorer_prefix {
+                get_prefixes.push(prefix.clone());
                 get_prefixes.push(format!("{prefix}/"));
             }
 
-            let layer = AuthMiddlewareLayer::new(auth)
-                .require_auth(require_auth)
+            let mut layer = AuthMiddlewareLayer::new(auth)
+                .require_auth(auth_config.require_auth)
                 .exempt_get_prefixes(get_prefixes);
 
-            tracing::info!("Authentication enabled (require_auth={require_auth})");
+            // Forward user-configured exempt paths.
+            if let Some(paths) = auth_config.exempt_paths {
+                layer = layer.exempt_paths(paths);
+            }
+
+            tracing::info!(
+                "Authentication enabled (require_auth={})",
+                auth_config.require_auth
+            );
 
             app.layer(layer)
         } else {

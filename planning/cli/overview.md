@@ -9,7 +9,7 @@ Port the Python CLI entry point (`__main__.py`) to idiomatic Rust. The module pr
 - Replace stub code in `src/cli.rs` with full implementation
 - Define `Transport`, `ApprovalMode`, and `LogLevel` enums with clap `ValueEnum`
 - Implement all CLI arguments matching the Python implementation
-- Implement JWT key resolution chain: `--jwt-key-file` > `--jwt-secret` > `JWT_SECRET` env
+- Implement JWT key resolution chain: `--jwt-key-file` > `--jwt-secret` > `APCORE_JWT_SECRET` env
 - Implement tracing subscriber initialization from `--log-level`
 - Implement approval handler construction from `--approval` mode
 - Validate extensions directory, port range, and name length
