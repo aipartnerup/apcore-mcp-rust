@@ -263,11 +263,16 @@ impl TransportManager {
         port: u16,
         extra_routes: Option<Router>,
     ) -> Result<(), TransportError> {
-        self.run_streamable_http_with_auth(handler, host, port, extra_routes, None, None)
+        self.run_streamable_http_with_auth(handler, host, port, extra_routes, None, false, None)
             .await
     }
 
     /// Run the MCP server over streamable-HTTP transport with optional authentication.
+    ///
+    /// When an `authenticator` is provided, requests are authenticated via the
+    /// existing [`AuthMiddlewareLayer`](crate::auth::middleware::AuthMiddlewareLayer)
+    /// which handles exempt paths, `require_auth` flag, and identity propagation.
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_streamable_http_with_auth(
         self: &Arc<Self>,
         handler: Arc<dyn McpHandler>,
@@ -275,58 +280,32 @@ impl TransportManager {
         port: u16,
         extra_routes: Option<Router>,
         authenticator: Option<Arc<dyn crate::auth::protocol::Authenticator>>,
-        exempt_paths: Option<std::collections::HashSet<String>>,
+        require_auth: bool,
+        explorer_prefix: Option<&str>,
     ) -> Result<(), TransportError> {
         Self::validate_host_port(host, port)?;
         tracing::info!("Starting streamable-http transport on {}:{}", host, port);
 
-        let mut app = self.build_streamable_http_app(handler, extra_routes);
+        let app = self.build_streamable_http_app(handler, extra_routes);
 
         // Apply auth middleware if an authenticator is provided.
-        if let Some(auth) = authenticator {
-            let exempt = exempt_paths.unwrap_or_default();
-            let require_auth = true;
-            app = app.layer(axum::middleware::from_fn(move |req: Request, next: axum::middleware::Next| {
-                let auth = Arc::clone(&auth);
-                let exempt = exempt.clone();
-                async move {
-                    let path = req.uri().path().to_string();
-                    let method = req.method().clone();
-                    // Skip auth for health/metrics endpoints.
-                    if path == "/health" || path == "/metrics" || exempt.contains(&path) {
-                        return next.run(req).await;
-                    }
-                    // Explorer: GET requests (browsing UI) are exempt,
-                    // POST requests (tool execution) require auth.
-                    if path.starts_with("/explorer") && method == axum::http::Method::GET {
-                        return next.run(req).await;
-                    }
-                    // Extract Authorization header.
-                    let auth_header = req.headers()
-                        .get("authorization")
-                        .and_then(|v| v.to_str().ok())
-                        .unwrap_or("");
-                    let mut headers = std::collections::HashMap::new();
-                    headers.insert("authorization".to_string(), auth_header.to_string());
-                    match auth.authenticate(&headers).await {
-                        Some(_identity) => next.run(req).await,
-                        None if !require_auth => next.run(req).await,
-                        None => {
-                            axum::response::Response::builder()
-                                .status(401)
-                                .header("WWW-Authenticate", "Bearer")
-                                .header("Content-Type", "application/json")
-                                .body(axum::body::Body::from(
-                                    r#"{"error":"unauthorized","message":"Missing or invalid Authorization header"}"#
-                                ))
-                                .unwrap()
-                        }
-                    }
-                }
-            }));
-        }
+        let app = if let Some(auth) = authenticator {
+            use crate::auth::middleware::AuthMiddlewareLayer;
 
-        let app = app;
+            // When auth is enabled, all paths (including explorer) require
+            // authentication. The explorer UI is only accessible with a valid
+            // token, matching the Python implementation behavior.
+            let _ = explorer_prefix; // acknowledged but not used for exemption
+
+            let layer = AuthMiddlewareLayer::new(auth).require_auth(require_auth);
+
+            tracing::info!("Authentication enabled (require_auth={require_auth})");
+
+            app.layer(layer)
+        } else {
+            app
+        };
+
         let addr: std::net::SocketAddr = format!("{}:{}", host, port)
             .parse()
             .map_err(|_| TransportError::InvalidHost(host.to_string()))?;

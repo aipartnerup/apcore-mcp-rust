@@ -499,20 +499,33 @@ impl APCoreMCP {
                             self.config.port,
                             explorer_router,
                             self.authenticator.clone(),
-                            self.config.exempt_paths.clone(),
+                            self.config.require_auth,
+                            if opts.explorer.explorer {
+                                Some(opts.explorer.explorer_prefix.as_str())
+                            } else {
+                                None
+                            },
                         )
                         .await
                         .map_err(|e| APCoreMCPError::ServerError(e.to_string())),
                     #[allow(deprecated)]
-                    "sse" => transport_manager
-                        .run_sse(
-                            Arc::clone(&handler),
-                            &self.config.host,
-                            self.config.port,
-                            explorer_router,
-                        )
-                        .await
-                        .map_err(|e| APCoreMCPError::ServerError(e.to_string())),
+                    "sse" => {
+                        if self.authenticator.is_some() {
+                            tracing::warn!(
+                                "Authentication is not supported on the deprecated SSE transport. \
+                                 Use streamable-http for authenticated servers."
+                            );
+                        }
+                        transport_manager
+                            .run_sse(
+                                Arc::clone(&handler),
+                                &self.config.host,
+                                self.config.port,
+                                explorer_router,
+                            )
+                            .await
+                            .map_err(|e| APCoreMCPError::ServerError(e.to_string()))
+                    }
                     _ => {
                         // stdio
                         transport_manager
