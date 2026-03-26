@@ -395,12 +395,55 @@ impl TransportManager {
         port: u16,
         extra_routes: Option<Router>,
     ) -> Result<(), TransportError> {
+        #[allow(deprecated)]
+        self.run_sse_with_auth(handler, host, port, extra_routes, HttpAuthConfig::default())
+            .await
+    }
+
+    /// Run the MCP server over SSE transport with optional authentication (deprecated).
+    #[deprecated(note = "SSE transport is deprecated. Use streamable-HTTP instead.")]
+    pub async fn run_sse_with_auth(
+        self: &Arc<Self>,
+        handler: Arc<dyn McpHandler>,
+        host: &str,
+        port: u16,
+        extra_routes: Option<Router>,
+        auth_config: HttpAuthConfig,
+    ) -> Result<(), TransportError> {
         Self::validate_host_port(host, port)?;
         tracing::info!("Starting sse transport on {}:{}", host, port);
         tracing::warn!("SSE transport is deprecated. Use Streamable HTTP instead.");
 
         #[allow(deprecated)]
         let app = self.build_sse_app(handler, extra_routes);
+
+        // Apply auth middleware (same logic as streamable-http).
+        let app = if let Some(auth) = auth_config.authenticator {
+            use crate::auth::middleware::AuthMiddlewareLayer;
+
+            let mut get_prefixes = Vec::new();
+            if let Some(prefix) = auth_config.explorer_prefix {
+                get_prefixes.push(prefix.clone());
+                get_prefixes.push(format!("{prefix}/"));
+            }
+
+            let mut layer = AuthMiddlewareLayer::new(auth)
+                .require_auth(auth_config.require_auth)
+                .exempt_get_prefixes(get_prefixes);
+
+            if let Some(paths) = auth_config.exempt_paths {
+                layer = layer.exempt_paths(paths);
+            }
+
+            tracing::info!(
+                "Authentication enabled (require_auth={})",
+                auth_config.require_auth
+            );
+
+            app.layer(layer)
+        } else {
+            app
+        };
 
         let addr: std::net::SocketAddr = format!("{}:{}", host, port)
             .parse()

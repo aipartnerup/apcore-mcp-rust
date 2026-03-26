@@ -497,47 +497,47 @@ impl APCoreMCP {
         let result = tokio::runtime::Runtime::new()
             .map_err(|e| APCoreMCPError::ServerError(e.to_string()))?
             .block_on(async {
+                use crate::server::transport::HttpAuthConfig;
                 match transport.as_str() {
-                    "streamable-http" => {
-                        use crate::server::transport::HttpAuthConfig;
-                        transport_manager
-                            .run_streamable_http_with_auth(
-                                Arc::clone(&handler),
-                                &self.config.host,
-                                self.config.port,
-                                explorer_router,
-                                HttpAuthConfig {
-                                    authenticator: self.authenticator.clone(),
-                                    require_auth: self.config.require_auth,
-                                    explorer_prefix: if opts.explorer.explorer {
-                                        Some(opts.explorer.explorer_prefix.clone())
-                                    } else {
-                                        None
-                                    },
-                                    exempt_paths: self.config.exempt_paths.clone(),
+                    "streamable-http" => transport_manager
+                        .run_streamable_http_with_auth(
+                            Arc::clone(&handler),
+                            &self.config.host,
+                            self.config.port,
+                            explorer_router,
+                            HttpAuthConfig {
+                                authenticator: self.authenticator.clone(),
+                                require_auth: self.config.require_auth,
+                                explorer_prefix: if opts.explorer.explorer {
+                                    Some(opts.explorer.explorer_prefix.clone())
+                                } else {
+                                    None
                                 },
-                            )
-                            .await
-                            .map_err(|e| APCoreMCPError::ServerError(e.to_string()))
-                    }
+                                exempt_paths: self.config.exempt_paths.clone(),
+                            },
+                        )
+                        .await
+                        .map_err(|e| APCoreMCPError::ServerError(e.to_string())),
                     #[allow(deprecated)]
-                    "sse" => {
-                        if self.authenticator.is_some() {
-                            tracing::warn!(
-                                "Authentication is not supported on the deprecated SSE transport. \
-                                 Use streamable-http for authenticated servers."
-                            );
-                        }
-                        transport_manager
-                            .run_sse(
-                                Arc::clone(&handler),
-                                &self.config.host,
-                                self.config.port,
-                                explorer_router,
-                            )
-                            .await
-                            .map_err(|e| APCoreMCPError::ServerError(e.to_string()))
-                    }
+                    "sse" => transport_manager
+                        .run_sse_with_auth(
+                            Arc::clone(&handler),
+                            &self.config.host,
+                            self.config.port,
+                            explorer_router,
+                            HttpAuthConfig {
+                                authenticator: self.authenticator.clone(),
+                                require_auth: self.config.require_auth,
+                                explorer_prefix: if opts.explorer.explorer {
+                                    Some(opts.explorer.explorer_prefix.clone())
+                                } else {
+                                    None
+                                },
+                                exempt_paths: self.config.exempt_paths.clone(),
+                            },
+                        )
+                        .await
+                        .map_err(|e| APCoreMCPError::ServerError(e.to_string())),
                     _ => {
                         // stdio
                         transport_manager
