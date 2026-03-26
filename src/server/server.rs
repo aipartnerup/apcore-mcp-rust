@@ -427,27 +427,54 @@ impl ServerHandler {
     }
 }
 
+/// Internal result type to distinguish success from JSON-RPC errors.
+enum RpcResult {
+    Success(Value),
+    Error { code: i32, message: String },
+    Notification, // no response needed
+}
+
+impl ServerHandler {
+    fn rpc_error(code: i32, message: impl Into<String>) -> RpcResult {
+        RpcResult::Error {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl crate::server::transport::McpHandler for ServerHandler {
     async fn handle_message(&self, message: Value) -> Option<Value> {
-        let method = message.get("method")?.as_str()?;
         let id = message.get("id").cloned();
 
-        let result = match method {
-            "initialize" => {
-                let caps = serde_json::json!({
-                    "capabilities": {
-                        "tools": { "listChanged": true },
-                        "resources": { "listChanged": false }
-                    },
-                    "serverInfo": {
-                        "name": self.init_options.server_name,
-                        "version": self.init_options.server_version
-                    },
-                    "protocolVersion": "2025-03-26"
-                });
-                Some(caps)
-            }
+        // Extract method — missing or non-string is an invalid request.
+        let method =
+            match message.get("method").and_then(|v| v.as_str()) {
+                Some(m) => m.to_string(),
+                None => {
+                    // Request (has id) without method → -32600 Invalid Request.
+                    // No id + no method → malformed notification, drop silently.
+                    return id.map(|id| serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": { "code": -32600, "message": "Invalid Request: missing 'method'" }
+                }));
+                }
+            };
+
+        let result = match method.as_str() {
+            "initialize" => RpcResult::Success(serde_json::json!({
+                "capabilities": {
+                    "tools": { "listChanged": true },
+                    "resources": { "listChanged": false }
+                },
+                "serverInfo": {
+                    "name": self.init_options.server_name,
+                    "version": self.init_options.server_version
+                },
+                "protocolVersion": "2025-03-26"
+            })),
             "tools/list" => {
                 let tools = (self.list_tools)();
                 let tools_json: Vec<Value> = tools
@@ -464,11 +491,30 @@ impl crate::server::transport::McpHandler for ServerHandler {
                         obj
                     })
                     .collect();
-                Some(serde_json::json!({ "tools": tools_json }))
+                RpcResult::Success(serde_json::json!({ "tools": tools_json }))
             }
             "tools/call" => {
-                let params = message.get("params")?;
-                let name = params.get("name")?.as_str()?.to_string();
+                let params = match message.get("params") {
+                    Some(p) => p,
+                    None => {
+                        return Self::wrap_response(
+                            id,
+                            ServerHandler::rpc_error(-32602, "Invalid params: missing 'params'"),
+                        );
+                    }
+                };
+                let name = match params.get("name").and_then(|v| v.as_str()) {
+                    Some(n) => n.to_string(),
+                    None => {
+                        return Self::wrap_response(
+                            id,
+                            ServerHandler::rpc_error(
+                                -32602,
+                                "Invalid params: missing 'name' in params",
+                            ),
+                        );
+                    }
+                };
                 let arguments = params
                     .get("arguments")
                     .cloned()
@@ -485,7 +531,7 @@ impl crate::server::transport::McpHandler for ServerHandler {
                         })
                     })
                     .collect();
-                Some(serde_json::json!({
+                RpcResult::Success(serde_json::json!({
                     "content": content,
                     "isError": call_result.is_error
                 }))
@@ -503,14 +549,33 @@ impl crate::server::transport::McpHandler for ServerHandler {
                             })
                         })
                         .collect();
-                    Some(serde_json::json!({ "resources": resources_json }))
+                    RpcResult::Success(serde_json::json!({ "resources": resources_json }))
                 } else {
-                    Some(serde_json::json!({ "resources": [] }))
+                    RpcResult::Success(serde_json::json!({ "resources": [] }))
                 }
             }
             "resources/read" => {
-                let params = message.get("params")?;
-                let uri = params.get("uri")?.as_str()?.to_string();
+                let params = match message.get("params") {
+                    Some(p) => p,
+                    None => {
+                        return Self::wrap_response(
+                            id,
+                            ServerHandler::rpc_error(-32602, "Invalid params: missing 'params'"),
+                        );
+                    }
+                };
+                let uri = match params.get("uri").and_then(|v| v.as_str()) {
+                    Some(u) => u.to_string(),
+                    None => {
+                        return Self::wrap_response(
+                            id,
+                            ServerHandler::rpc_error(
+                                -32602,
+                                "Invalid params: missing 'uri' in params",
+                            ),
+                        );
+                    }
+                };
                 if let Some(ref handler) = self.read_resource {
                     match handler(uri) {
                         Ok(contents) => {
@@ -523,37 +588,37 @@ impl crate::server::transport::McpHandler for ServerHandler {
                                     })
                                 })
                                 .collect();
-                            Some(serde_json::json!({ "contents": contents_json }))
+                            RpcResult::Success(serde_json::json!({ "contents": contents_json }))
                         }
-                        Err(e) => Some(serde_json::json!({
-                            "error": { "code": -32602, "message": e.to_string() }
-                        })),
+                        Err(e) => ServerHandler::rpc_error(-32602, e.to_string()),
                     }
                 } else {
-                    Some(serde_json::json!({
-                        "error": { "code": -32601, "message": "resources not supported" }
-                    }))
+                    ServerHandler::rpc_error(-32601, "resources not supported")
                 }
             }
-            "notifications/initialized" | "notifications/cancelled" => None,
-            _ => Some(serde_json::json!({
-                "error": { "code": -32601, "message": format!("unknown method: {method}") }
-            })),
+            "notifications/initialized" | "notifications/cancelled" => RpcResult::Notification,
+            _ => ServerHandler::rpc_error(-32601, format!("unknown method: {method}")),
         };
 
-        // Wrap in JSON-RPC response if request had an id
-        match (id, result) {
-            (Some(id), Some(res)) => Some(serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": res
-            })),
-            (Some(id), None) => Some(serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {}
-            })),
-            (None, _) => None, // notification — no response
+        Self::wrap_response(id, result)
+    }
+}
+
+impl ServerHandler {
+    /// Wrap an `RpcResult` into a JSON-RPC 2.0 response envelope.
+    fn wrap_response(id: Option<Value>, result: RpcResult) -> Option<Value> {
+        match result {
+            RpcResult::Notification => None,
+            RpcResult::Success(val) => {
+                id.map(|id| serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": val }))
+            }
+            RpcResult::Error { code, message } => id.map(|id| {
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": { "code": code, "message": message }
+                })
+            }),
         }
     }
 }
@@ -565,6 +630,7 @@ impl crate::server::transport::McpHandler for ServerHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::types::{ServerCapabilities, TextContent, ToolsCapability};
 
     // ---- TransportKind::from_str tests ----
 
@@ -1066,5 +1132,153 @@ mod tests {
         let server = MCPServer::with_params("test", "invalid-transport", "1.2.3.4", 5555);
         assert_eq!(server.transport(), TransportKind::Stdio);
         assert_eq!(server.address(), "stdio");
+    }
+
+    // ---- ServerHandler / McpHandler tests ----
+
+    fn make_test_handler() -> ServerHandler {
+        use std::pin::Pin;
+        let list_tools: Arc<dyn Fn() -> Vec<Tool> + Send + Sync> = Arc::new(|| {
+            vec![Tool {
+                name: "test.echo".into(),
+                description: "Echo test".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+                annotations: None,
+                meta: None,
+            }]
+        });
+        let call_tool: CallToolHandler = Arc::new(|name, args, _extra| {
+            Box::pin(async move {
+                let text = args
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("no text");
+                CallToolResult {
+                    content: vec![TextContent::new(format!(
+                        "{{\"name\":\"{name}\",\"text\":\"{text}\"}}"
+                    ))],
+                    is_error: false,
+                }
+            }) as Pin<Box<dyn std::future::Future<Output = CallToolResult> + Send>>
+        });
+        ServerHandler {
+            list_tools,
+            call_tool,
+            list_resources: None,
+            read_resource: None,
+            init_options: InitializationOptions {
+                server_name: "test-server".into(),
+                server_version: "1.0.0".into(),
+                capabilities: ServerCapabilities {
+                    tools: Some(ToolsCapability { list_changed: true }),
+                    resources: None,
+                },
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn handler_initialize_returns_capabilities() {
+        use crate::server::transport::McpHandler;
+        let h = make_test_handler();
+        let resp = h
+            .handle_message(
+                serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp["id"], 1);
+        assert!(resp.get("result").is_some());
+        assert!(resp.get("error").is_none());
+        assert_eq!(resp["result"]["serverInfo"]["name"], "test-server");
+    }
+
+    #[tokio::test]
+    async fn handler_tools_list_returns_tools() {
+        use crate::server::transport::McpHandler;
+        let h = make_test_handler();
+        let resp = h
+            .handle_message(
+                serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp["result"]["tools"][0]["name"], "test.echo");
+    }
+
+    #[tokio::test]
+    async fn handler_tools_call_success() {
+        use crate::server::transport::McpHandler;
+        let h = make_test_handler();
+        let resp = h
+            .handle_message(serde_json::json!({
+                "jsonrpc":"2.0","id":3,"method":"tools/call",
+                "params":{"name":"test.echo","arguments":{"text":"hello"}}
+            }))
+            .await
+            .unwrap();
+        assert_eq!(resp["result"]["isError"], false);
+        assert!(resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn handler_unknown_method_returns_error() {
+        use crate::server::transport::McpHandler;
+        let h = make_test_handler();
+        let resp = h
+            .handle_message(
+                serde_json::json!({"jsonrpc":"2.0","id":4,"method":"foo/bar","params":{}}),
+            )
+            .await
+            .unwrap();
+        // Must be a top-level "error", NOT nested in "result"
+        assert!(
+            resp.get("error").is_some(),
+            "expected top-level 'error' key"
+        );
+        assert!(resp.get("result").is_none(), "must not have 'result' key");
+        assert_eq!(resp["error"]["code"], -32601);
+    }
+
+    #[tokio::test]
+    async fn handler_missing_method_returns_invalid_request() {
+        use crate::server::transport::McpHandler;
+        let h = make_test_handler();
+        let resp = h
+            .handle_message(serde_json::json!({"jsonrpc":"2.0","id":5}))
+            .await
+            .unwrap();
+        assert!(resp.get("error").is_some());
+        assert_eq!(resp["error"]["code"], -32600);
+    }
+
+    #[tokio::test]
+    async fn handler_tools_call_missing_name_returns_error() {
+        use crate::server::transport::McpHandler;
+        let h = make_test_handler();
+        let resp = h
+            .handle_message(serde_json::json!({
+                "jsonrpc":"2.0","id":6,"method":"tools/call",
+                "params":{"arguments":{}}
+            }))
+            .await
+            .unwrap();
+        assert!(resp.get("error").is_some());
+        assert_eq!(resp["error"]["code"], -32602);
+    }
+
+    #[tokio::test]
+    async fn handler_notification_returns_none() {
+        use crate::server::transport::McpHandler;
+        let h = make_test_handler();
+        let resp = h
+            .handle_message(
+                serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            )
+            .await;
+        assert!(resp.is_none());
     }
 }

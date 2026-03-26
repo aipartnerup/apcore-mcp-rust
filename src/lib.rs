@@ -24,7 +24,7 @@ pub use crate::apcore_mcp::{
     APCoreMCP, APCoreMCPBuilder, APCoreMCPConfig, APCoreMCPError, BackendSource,
 };
 pub use crate::apcore_mcp::{AsyncServeConfig, OpenAIToolsConfig, ServeConfig};
-pub use crate::apcore_mcp::{AsyncServeOptions, ServeOptions};
+pub use crate::apcore_mcp::{AsyncServeOptions, ExplorerOptions, ServeOptions};
 
 // ---- Re-exports: top-level convenience functions ----------------------------
 pub use crate::apcore_mcp::{async_serve, serve, to_openai_tools};

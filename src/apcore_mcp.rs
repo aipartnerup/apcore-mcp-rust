@@ -426,6 +426,12 @@ impl APCoreMCP {
     /// - `"stdio"` — standard I/O transport
     /// - `"streamable-http"` — HTTP-based streamable transport
     /// - `"sse"` — Server-Sent Events transport
+    ///
+    /// # Panics
+    ///
+    /// Panics if called from within an active Tokio runtime (e.g. inside
+    /// `#[tokio::main]`).  Use [`async_serve`](Self::async_serve) for
+    /// async contexts.
     pub fn serve(&self) -> Result<(), APCoreMCPError> {
         self.serve_with_options(ServeOptions::default())
     }
@@ -433,7 +439,7 @@ impl APCoreMCP {
     /// Synchronously start the MCP server with custom options (blocks the current thread).
     pub fn serve_with_options(&self, opts: ServeOptions) -> Result<(), APCoreMCPError> {
         // Validate explorer prefix if explorer is enabled
-        if opts.explorer && !opts.explorer_prefix.starts_with('/') {
+        if opts.explorer.explorer && !opts.explorer.explorer_prefix.starts_with('/') {
             return Err(APCoreMCPError::InvalidExplorerPrefix);
         }
 
@@ -465,17 +471,17 @@ impl APCoreMCP {
         );
 
         // Build explorer router if enabled on HTTP transport.
-        let explorer_router = if opts.explorer && transport != "stdio" {
+        let explorer_router = if opts.explorer.explorer && transport != "stdio" {
             let explorer_config = self.build_explorer_config(
                 &tools,
                 &router,
-                &opts.explorer_prefix,
-                opts.allow_execute,
-                &opts.explorer_title,
-                opts.explorer_project_name.as_deref(),
-                opts.explorer_project_url.as_deref(),
+                &opts.explorer.explorer_prefix,
+                opts.explorer.allow_execute,
+                &opts.explorer.explorer_title,
+                opts.explorer.explorer_project_name.as_deref(),
+                opts.explorer.explorer_project_url.as_deref(),
             );
-            tracing::info!("Explorer UI mounted at {}", opts.explorer_prefix);
+            tracing::info!("Explorer UI mounted at {}", opts.explorer.explorer_prefix);
             Some(create_explorer_mount(explorer_config))
         } else {
             None
@@ -532,7 +538,7 @@ impl APCoreMCP {
     /// server infrastructure.
     pub async fn async_serve(&self, opts: AsyncServeOptions) -> Result<Router, APCoreMCPError> {
         // Validate explorer prefix
-        if opts.explorer && !opts.explorer_prefix.starts_with('/') {
+        if opts.explorer.explorer && !opts.explorer.explorer_prefix.starts_with('/') {
             return Err(APCoreMCPError::InvalidExplorerPrefix);
         }
 
@@ -560,19 +566,19 @@ impl APCoreMCP {
         let mut app = transport_manager.health_metrics_router();
 
         // Mount explorer if enabled
-        if opts.explorer {
+        if opts.explorer.explorer {
             let explorer_config = self.build_explorer_config(
                 &tools,
                 &router,
-                &opts.explorer_prefix,
-                opts.allow_execute,
-                &opts.explorer_title,
-                opts.explorer_project_name.as_deref(),
-                opts.explorer_project_url.as_deref(),
+                &opts.explorer.explorer_prefix,
+                opts.explorer.allow_execute,
+                &opts.explorer.explorer_title,
+                opts.explorer.explorer_project_name.as_deref(),
+                opts.explorer.explorer_project_url.as_deref(),
             );
             let explorer_router = create_explorer_mount(explorer_config);
             app = app.merge(explorer_router);
-            tracing::info!("Explorer UI mounted at {}", opts.explorer_prefix);
+            tracing::info!("Explorer UI mounted at {}", opts.explorer.explorer_prefix);
         }
 
         Ok(app)
@@ -649,63 +655,11 @@ impl APCoreMCP {
     }
 }
 
-// ---- ServeOptions -----------------------------------------------------------
+// ---- ExplorerOptions --------------------------------------------------------
 
-/// Options for [`APCoreMCP::serve_with_options`].
-pub struct ServeOptions {
-    /// Callback invoked after setup, before the transport starts.
-    pub on_startup: Option<Box<dyn Fn() + Send + Sync>>,
-    /// Callback invoked after the transport completes (even on error).
-    pub on_shutdown: Option<Box<dyn Fn() + Send + Sync>>,
-    /// Enable the browser-based Tool Explorer UI (HTTP transports only).
-    pub explorer: bool,
-    /// URL prefix for the explorer.
-    pub explorer_prefix: String,
-    /// Page title shown in the explorer browser tab and heading.
-    pub explorer_title: String,
-    /// Optional project name shown in the explorer footer.
-    pub explorer_project_name: Option<String>,
-    /// Optional project URL linked in the explorer footer.
-    pub explorer_project_url: Option<String>,
-    /// Allow tool execution from the explorer UI.
-    pub allow_execute: bool,
-}
-
-impl Default for ServeOptions {
-    fn default() -> Self {
-        Self {
-            on_startup: None,
-            on_shutdown: None,
-            explorer: false,
-            explorer_prefix: "/explorer".to_string(),
-            explorer_title: "MCP Tool Explorer".to_string(),
-            explorer_project_name: None,
-            explorer_project_url: None,
-            allow_execute: false,
-        }
-    }
-}
-
-impl std::fmt::Debug for ServeOptions {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ServeOptions")
-            .field("on_startup", &self.on_startup.as_ref().map(|_| "..."))
-            .field("on_shutdown", &self.on_shutdown.as_ref().map(|_| "..."))
-            .field("explorer", &self.explorer)
-            .field("explorer_prefix", &self.explorer_prefix)
-            .field("explorer_title", &self.explorer_title)
-            .field("explorer_project_name", &self.explorer_project_name)
-            .field("explorer_project_url", &self.explorer_project_url)
-            .field("allow_execute", &self.allow_execute)
-            .finish()
-    }
-}
-
-// ---- AsyncServeOptions ------------------------------------------------------
-
-/// Options for [`APCoreMCP::async_serve`].
-#[derive(Debug)]
-pub struct AsyncServeOptions {
+/// Shared explorer configuration for [`ServeOptions`] and [`AsyncServeOptions`].
+#[derive(Debug, Clone)]
+pub struct ExplorerOptions {
     /// Enable the browser-based Tool Explorer UI.
     pub explorer: bool,
     /// URL prefix for the explorer.
@@ -720,7 +674,7 @@ pub struct AsyncServeOptions {
     pub allow_execute: bool,
 }
 
-impl Default for AsyncServeOptions {
+impl Default for ExplorerOptions {
     fn default() -> Self {
         Self {
             explorer: false,
@@ -731,6 +685,38 @@ impl Default for AsyncServeOptions {
             allow_execute: false,
         }
     }
+}
+
+// ---- ServeOptions -----------------------------------------------------------
+
+/// Options for [`APCoreMCP::serve_with_options`].
+#[derive(Default)]
+pub struct ServeOptions {
+    /// Callback invoked after setup, before the transport starts.
+    pub on_startup: Option<Box<dyn Fn() + Send + Sync>>,
+    /// Callback invoked after the transport completes (even on error).
+    pub on_shutdown: Option<Box<dyn Fn() + Send + Sync>>,
+    /// Explorer UI configuration.
+    pub explorer: ExplorerOptions,
+}
+
+impl std::fmt::Debug for ServeOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServeOptions")
+            .field("on_startup", &self.on_startup.as_ref().map(|_| "..."))
+            .field("on_shutdown", &self.on_shutdown.as_ref().map(|_| "..."))
+            .field("explorer", &self.explorer)
+            .finish()
+    }
+}
+
+// ---- AsyncServeOptions ------------------------------------------------------
+
+/// Options for [`APCoreMCP::async_serve`].
+#[derive(Debug, Default)]
+pub struct AsyncServeOptions {
+    /// Explorer UI configuration.
+    pub explorer: ExplorerOptions,
 }
 
 // ---- APCoreMCPBuilder -------------------------------------------------------
@@ -934,12 +920,17 @@ impl APCoreMCPBuilder {
                     path.display()
                 )));
             }
-            BackendSource::Registry(reg) => {
-                let exec = Arc::new(Executor::new(
-                    Registry::new(),
-                    apcore::config::Config::default(),
+            BackendSource::Registry(_reg) => {
+                // Registry cannot be cloned (contains Box<dyn Module>, callbacks),
+                // so we cannot create an Executor from it.  Users must create an
+                // Executor themselves and pass it via BackendSource::Executor.
+                return Err(APCoreMCPError::BackendResolution(
+                    "Registry backend is not supported: Registry cannot be shared with \
+                     Executor because it is not Clone. Create an Executor from your \
+                     Registry first: `let exec = Arc::new(Executor::new(registry, config)); \
+                     builder.backend(exec)`"
+                        .to_string(),
                 ));
-                (Some(reg), exec)
             }
             BackendSource::Executor(exec) => (None, exec),
         };
@@ -1522,12 +1513,13 @@ mod tests {
     }
 
     #[test]
-    fn builder_with_registry_backend_succeeds() {
+    fn builder_with_registry_backend_returns_error() {
         let reg = Arc::new(Registry::new());
         let result = APCoreMCP::builder()
             .backend(BackendSource::Registry(reg))
             .build();
-        assert!(result.is_ok());
+        assert!(result.is_err());
+        assert!(matches!(result, Err(APCoreMCPError::BackendResolution(_))));
     }
 
     #[test]
@@ -1704,8 +1696,11 @@ mod tests {
     fn serve_rejects_invalid_explorer_prefix() {
         let mcp = make_test_apcore_mcp();
         let result = mcp.serve_with_options(ServeOptions {
-            explorer: true,
-            explorer_prefix: "no-slash".into(),
+            explorer: ExplorerOptions {
+                explorer: true,
+                explorer_prefix: "no-slash".into(),
+                ..Default::default()
+            },
             ..Default::default()
         });
         assert!(matches!(result, Err(APCoreMCPError::InvalidExplorerPrefix)));
@@ -1723,9 +1718,11 @@ mod tests {
         let mcp = make_test_apcore_mcp();
         let result = mcp
             .async_serve(AsyncServeOptions {
-                explorer: true,
-                explorer_prefix: "no-slash".into(),
-                ..Default::default()
+                explorer: ExplorerOptions {
+                    explorer: true,
+                    explorer_prefix: "no-slash".into(),
+                    ..Default::default()
+                },
             })
             .await;
         assert!(matches!(result, Err(APCoreMCPError::InvalidExplorerPrefix)));
@@ -1828,14 +1825,14 @@ mod tests {
         let opts = ServeOptions::default();
         assert!(opts.on_startup.is_none());
         assert!(opts.on_shutdown.is_none());
-        assert!(!opts.explorer);
+        assert!(!opts.explorer.explorer);
     }
 
     #[test]
     fn async_serve_options_default() {
         let opts = AsyncServeOptions::default();
-        assert!(!opts.explorer);
-        assert_eq!(opts.explorer_prefix, "/explorer");
+        assert!(!opts.explorer.explorer);
+        assert_eq!(opts.explorer.explorer_prefix, "/explorer");
     }
 
     // -- build_registry_json tests (Task 8, helper) ---------------------------

@@ -19,7 +19,7 @@ use apcore::config::Config;
 use apcore::executor::Executor;
 use apcore::module::{Module, ModuleAnnotations};
 use apcore::registry::registry::{ModuleDescriptor, Registry};
-use apcore_mcp::{APCoreMCP, ServeOptions};
+use apcore_mcp::{APCoreMCP, ExplorerOptions, ServeOptions};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing (respects RUST_LOG env var)
@@ -118,12 +118,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 4. Serve (blocks the current thread).
     mcp.serve_with_options(ServeOptions {
-        explorer: true,
-        allow_execute: true,
-        explorer_prefix: "/explorer".to_string(),
-        explorer_title: "APCore MCP Examples Explorer".to_string(),
-        explorer_project_name: Some("apcore-mcp".to_string()),
-        explorer_project_url: Some("https://github.com/aiperceivable/apcore-mcp-rust".to_string()),
+        explorer: ExplorerOptions {
+            explorer: true,
+            allow_execute: true,
+            explorer_prefix: "/explorer".to_string(),
+            explorer_title: "APCore MCP Examples Explorer".to_string(),
+            explorer_project_name: Some("apcore-mcp".to_string()),
+            explorer_project_url: Some(
+                "https://github.com/aiperceivable/apcore-mcp-rust".to_string(),
+            ),
+        },
         on_startup: Some(Box::new(|| {
             println!("\n  MCP server ready at http://127.0.0.1:8000");
             println!("  Explorer UI at     http://127.0.0.1:8000/explorer\n");

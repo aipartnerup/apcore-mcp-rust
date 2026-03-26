@@ -221,6 +221,10 @@ impl TransportManager {
         handler: Arc<dyn McpHandler>,
         extra_routes: Option<Router>,
     ) -> Router {
+        // TODO: Per MCP spec, each client connection should get its own
+        // session ID.  Currently a single ID is shared across all connections,
+        // which means DELETE (session termination) affects all clients.
+        // Requires a session store keyed by UUID.
         let session_id = uuid::Uuid::new_v4().to_string();
         let mcp_state = StreamableHttpState {
             handler,
