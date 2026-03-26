@@ -605,6 +605,21 @@ impl APCoreMCP {
             tracing::info!("Explorer UI mounted at {}", opts.explorer.explorer_prefix);
         }
 
+        // Apply auth middleware if authenticator is configured.
+        let app = crate::server::transport::apply_auth_layer(
+            app,
+            crate::server::transport::HttpAuthConfig {
+                authenticator: self.authenticator.clone(),
+                require_auth: self.config.require_auth,
+                explorer_prefix: if opts.explorer.explorer {
+                    Some(opts.explorer.explorer_prefix.clone())
+                } else {
+                    None
+                },
+                exempt_paths: self.config.exempt_paths.clone(),
+            },
+        );
+
         Ok(app)
     }
 

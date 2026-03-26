@@ -72,7 +72,7 @@ pub trait McpHandler: Send + Sync {
 // ---------------------------------------------------------------------------
 
 /// Authentication configuration for HTTP transports.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct HttpAuthConfig {
     /// Optional authenticator. When `None`, no auth middleware is applied.
     pub authenticator: Option<Arc<dyn crate::auth::protocol::Authenticator>>,
@@ -82,6 +82,66 @@ pub struct HttpAuthConfig {
     pub explorer_prefix: Option<String>,
     /// User-configured paths that bypass authentication entirely.
     pub exempt_paths: Option<std::collections::HashSet<String>>,
+}
+
+impl std::fmt::Debug for HttpAuthConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpAuthConfig")
+            .field("authenticator", &self.authenticator.as_ref().map(|_| "..."))
+            .field("require_auth", &self.require_auth)
+            .field("explorer_prefix", &self.explorer_prefix)
+            .field("exempt_paths", &self.exempt_paths)
+            .finish()
+    }
+}
+
+/// Apply [`AuthMiddlewareLayer`] to a router based on [`HttpAuthConfig`].
+///
+/// Returns the router unchanged if no authenticator is configured.
+/// Validates that `exempt_paths` entries start with `/`.
+pub(crate) fn apply_auth_layer(app: Router, auth_config: HttpAuthConfig) -> Router {
+    let Some(auth) = auth_config.authenticator else {
+        return app;
+    };
+
+    use crate::auth::middleware::AuthMiddlewareLayer;
+
+    // Explorer browsing (GET) is exempt; execution (POST) requires auth.
+    let mut get_prefixes = Vec::new();
+    if let Some(prefix) = auth_config.explorer_prefix {
+        get_prefixes.push(prefix.clone());
+        get_prefixes.push(format!("{prefix}/"));
+    }
+
+    let mut layer = AuthMiddlewareLayer::new(auth)
+        .require_auth(auth_config.require_auth)
+        .exempt_get_prefixes(get_prefixes);
+
+    // Forward user-configured exempt paths (normalize missing leading /).
+    if let Some(paths) = auth_config.exempt_paths {
+        let normalized: std::collections::HashSet<String> = paths
+            .into_iter()
+            .map(|p| {
+                if p.starts_with('/') {
+                    p
+                } else {
+                    tracing::warn!(
+                        "exempt_paths entry '{}' missing leading '/', auto-prepending",
+                        p
+                    );
+                    format!("/{p}")
+                }
+            })
+            .collect();
+        layer = layer.exempt_paths(normalized);
+    }
+
+    tracing::info!(
+        "Authentication enabled (require_auth={})",
+        auth_config.require_auth
+    );
+
+    app.layer(layer)
 }
 
 // ---------------------------------------------------------------------------
@@ -308,36 +368,7 @@ impl TransportManager {
         tracing::info!("Starting streamable-http transport on {}:{}", host, port);
 
         let app = self.build_streamable_http_app(handler, extra_routes);
-
-        // Apply auth middleware if an authenticator is provided.
-        let app = if let Some(auth) = auth_config.authenticator {
-            use crate::auth::middleware::AuthMiddlewareLayer;
-
-            // Explorer browsing (GET) is exempt; execution (POST) requires auth.
-            let mut get_prefixes = Vec::new();
-            if let Some(prefix) = auth_config.explorer_prefix {
-                get_prefixes.push(prefix.clone());
-                get_prefixes.push(format!("{prefix}/"));
-            }
-
-            let mut layer = AuthMiddlewareLayer::new(auth)
-                .require_auth(auth_config.require_auth)
-                .exempt_get_prefixes(get_prefixes);
-
-            // Forward user-configured exempt paths.
-            if let Some(paths) = auth_config.exempt_paths {
-                layer = layer.exempt_paths(paths);
-            }
-
-            tracing::info!(
-                "Authentication enabled (require_auth={})",
-                auth_config.require_auth
-            );
-
-            app.layer(layer)
-        } else {
-            app
-        };
+        let app = apply_auth_layer(app, auth_config);
 
         let addr: std::net::SocketAddr = format!("{}:{}", host, port)
             .parse()
@@ -417,33 +448,7 @@ impl TransportManager {
         #[allow(deprecated)]
         let app = self.build_sse_app(handler, extra_routes);
 
-        // Apply auth middleware (same logic as streamable-http).
-        let app = if let Some(auth) = auth_config.authenticator {
-            use crate::auth::middleware::AuthMiddlewareLayer;
-
-            let mut get_prefixes = Vec::new();
-            if let Some(prefix) = auth_config.explorer_prefix {
-                get_prefixes.push(prefix.clone());
-                get_prefixes.push(format!("{prefix}/"));
-            }
-
-            let mut layer = AuthMiddlewareLayer::new(auth)
-                .require_auth(auth_config.require_auth)
-                .exempt_get_prefixes(get_prefixes);
-
-            if let Some(paths) = auth_config.exempt_paths {
-                layer = layer.exempt_paths(paths);
-            }
-
-            tracing::info!(
-                "Authentication enabled (require_auth={})",
-                auth_config.require_auth
-            );
-
-            app.layer(layer)
-        } else {
-            app
-        };
+        let app = apply_auth_layer(app, auth_config);
 
         let addr: std::net::SocketAddr = format!("{}:{}", host, port)
             .parse()
@@ -1740,5 +1745,43 @@ mod tests {
         assert_eq!(String::from_utf8(body).unwrap(), "hello-integration");
 
         server.abort();
+    }
+
+    // ---- HttpAuthConfig tests ────────────────────────────────────────
+
+    #[test]
+    fn http_auth_config_default() {
+        let cfg = HttpAuthConfig::default();
+        assert!(cfg.authenticator.is_none());
+        assert!(!cfg.require_auth);
+        assert!(cfg.explorer_prefix.is_none());
+        assert!(cfg.exempt_paths.is_none());
+    }
+
+    #[test]
+    fn http_auth_config_debug_does_not_panic() {
+        let cfg = HttpAuthConfig::default();
+        let debug = format!("{:?}", cfg);
+        assert!(debug.contains("HttpAuthConfig"));
+    }
+
+    #[test]
+    fn http_auth_config_clone() {
+        let cfg = HttpAuthConfig {
+            require_auth: true,
+            explorer_prefix: Some("/explorer".into()),
+            ..Default::default()
+        };
+        let cloned = cfg.clone();
+        assert!(cloned.require_auth);
+        assert_eq!(cloned.explorer_prefix.as_deref(), Some("/explorer"));
+    }
+
+    #[test]
+    fn apply_auth_layer_without_authenticator_is_noop() {
+        let app = Router::new().route("/test", get(|| async { "ok" }));
+        let result = super::apply_auth_layer(app, HttpAuthConfig::default());
+        // Should return a valid router (no panic).
+        let _ = result;
     }
 }
