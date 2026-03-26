@@ -292,12 +292,16 @@ impl TransportManager {
         let app = if let Some(auth) = authenticator {
             use crate::auth::middleware::AuthMiddlewareLayer;
 
-            // When auth is enabled, all paths (including explorer) require
-            // authentication. The explorer UI is only accessible with a valid
-            // token, matching the Python implementation behavior.
-            let _ = explorer_prefix; // acknowledged but not used for exemption
+            // Explorer browsing (GET) is exempt; execution (POST) requires auth.
+            let mut get_prefixes = Vec::new();
+            if let Some(prefix) = explorer_prefix {
+                get_prefixes.push(prefix.to_string());
+                get_prefixes.push(format!("{prefix}/"));
+            }
 
-            let layer = AuthMiddlewareLayer::new(auth).require_auth(require_auth);
+            let layer = AuthMiddlewareLayer::new(auth)
+                .require_auth(require_auth)
+                .exempt_get_prefixes(get_prefixes);
 
             tracing::info!("Authentication enabled (require_auth={require_auth})");
 

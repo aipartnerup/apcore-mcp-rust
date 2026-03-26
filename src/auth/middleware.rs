@@ -55,6 +55,8 @@ pub struct AuthMiddlewareLayer {
     authenticator: Arc<dyn Authenticator>,
     exempt_paths: HashSet<String>,
     exempt_prefixes: Vec<String>,
+    /// Prefixes exempt only for GET requests (e.g. explorer browsing).
+    exempt_get_prefixes: Vec<String>,
     require_auth: bool,
 }
 
@@ -70,6 +72,7 @@ impl AuthMiddlewareLayer {
             authenticator,
             exempt_paths: HashSet::from(["/health".to_string(), "/metrics".to_string()]),
             exempt_prefixes: Vec::new(),
+            exempt_get_prefixes: Vec::new(),
             require_auth: true,
         }
     }
@@ -83,6 +86,15 @@ impl AuthMiddlewareLayer {
     /// Set the path prefixes that bypass authentication.
     pub fn exempt_prefixes(mut self, prefixes: Vec<String>) -> Self {
         self.exempt_prefixes = prefixes;
+        self
+    }
+
+    /// Set path prefixes that bypass authentication for GET requests only.
+    ///
+    /// POST/PUT/DELETE to these prefixes still require authentication.
+    /// Useful for explorer UI: browsing (GET) is open, execution (POST) is protected.
+    pub fn exempt_get_prefixes(mut self, prefixes: Vec<String>) -> Self {
+        self.exempt_get_prefixes = prefixes;
         self
     }
 
@@ -104,6 +116,7 @@ impl<S> Layer<S> for AuthMiddlewareLayer {
             authenticator: self.authenticator.clone(),
             exempt_paths: self.exempt_paths.clone(),
             exempt_prefixes: self.exempt_prefixes.clone(),
+            exempt_get_prefixes: self.exempt_get_prefixes.clone(),
             require_auth: self.require_auth,
         }
     }
@@ -116,6 +129,7 @@ pub struct AuthMiddlewareService<S> {
     authenticator: Arc<dyn Authenticator>,
     exempt_paths: HashSet<String>,
     exempt_prefixes: Vec<String>,
+    exempt_get_prefixes: Vec<String>,
     require_auth: bool,
 }
 
@@ -147,6 +161,7 @@ where
         let authenticator = self.authenticator.clone();
         let exempt_paths = self.exempt_paths.clone();
         let exempt_prefixes = self.exempt_prefixes.clone();
+        let exempt_get_prefixes = self.exempt_get_prefixes.clone();
         let require_auth = self.require_auth;
         // Clone inner service (tower best practice: use the ready service,
         // swap in a fresh clone for subsequent calls).
@@ -155,11 +170,18 @@ where
 
         Box::pin(async move {
             let path = req.uri().path().to_string();
+            let method = req.method().clone();
             let is_exempt = is_path_exempt(&path, &exempt_paths, &exempt_prefixes);
+
+            // GET-only prefix exemption (e.g. explorer browsing).
+            let is_get_exempt = method == axum::http::Method::GET
+                && exempt_get_prefixes
+                    .iter()
+                    .any(|prefix| path == *prefix || path.starts_with(prefix));
 
             let headers = extract_headers(&req);
 
-            if is_exempt {
+            if is_exempt || is_get_exempt {
                 // Best-effort: try to authenticate but ignore failures.
                 let identity = authenticator.authenticate(&headers).await;
                 AUTH_IDENTITY.scope(identity, inner.call(req)).await
