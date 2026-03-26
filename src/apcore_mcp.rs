@@ -333,6 +333,12 @@ impl APCoreMCP {
             .map(|t| t.iter().map(|s| s.as_str()).collect());
         let tags_slice: Option<&[&str]> = tags_refs.as_deref();
         let prefix = self.config.prefix.as_deref();
+        // TODO: Use build_tools_with_metadata() once apcore Rust crate adds
+        // `metadata: Option<HashMap<String, Value>>` to ModuleDescriptor.
+        // Currently ModuleDescriptor has no metadata field, so display overlay
+        // (alias, description, guidance from metadata.display.mcp) cannot be
+        // resolved at runtime. The Python and TypeScript SDKs support this
+        // because their apcore SDKs include descriptor.metadata.
         let tools = factory.build_tools(self.reg(), tags_slice, prefix);
 
         // Create execution router backed by the real apcore Executor.
