@@ -22,7 +22,7 @@ Open http://127.0.0.1:8000/explorer to see the Tool Explorer UI.
 ### Enable JWT Authentication
 
 ```bash
-JWT_SECRET=my-secret cargo run --example run
+APCORE_JWT_SECRET=my-secret cargo run --example run
 ```
 
 The server will print a sample token you can use for testing:

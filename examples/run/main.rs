@@ -4,9 +4,9 @@
 //!
 //!     cargo run --example run
 //!
-//! Enable JWT authentication by setting JWT_SECRET:
+//! Enable JWT authentication by setting APCORE_JWT_SECRET:
 //!
-//!     JWT_SECRET=my-secret cargo run --example run
+//!     APCORE_JWT_SECRET=my-secret cargo run --example run
 //!
 //! Then open http://127.0.0.1:8000/explorer in your browser.
 //!
@@ -104,8 +104,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 2. Create executor from registry.
     let executor = Arc::new(Executor::new(registry, Config::default()));
 
-    // 3. Build JWT authenticator if JWT_SECRET is set.
-    let jwt_secret = std::env::var("JWT_SECRET").ok();
+    // 3. Build JWT authenticator if APCORE_JWT_SECRET is set.
+    let jwt_secret = std::env::var("APCORE_JWT_SECRET").ok();
     let mut builder = APCoreMCP::builder()
         .backend(executor)
         .name("apcore-mcp-examples")
@@ -141,7 +141,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("Sample token:        {token}");
     } else {
         builder = builder.require_auth(false);
-        tracing::info!("JWT authentication:  disabled (set JWT_SECRET to enable)");
+        tracing::info!("JWT authentication:  disabled (set APCORE_JWT_SECRET to enable)");
     }
 
     let mcp = builder.build()?;

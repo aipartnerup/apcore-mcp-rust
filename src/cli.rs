@@ -145,7 +145,7 @@ pub struct CliArgs {
     pub explorer_project_url: Option<String>,
 
     /// JWT secret key for Bearer token authentication.
-    #[arg(long, env = "APCORE_MCP_JWT_SECRET")]
+    #[arg(long, env = "APCORE_JWT_SECRET")]
     pub jwt_secret: Option<String>,
 
     /// Path to PEM key file for JWT verification.
@@ -221,7 +221,7 @@ fn resolve_jwt_key(args: &CliArgs) -> Result<Option<String>, CliError> {
     } else if let Some(ref secret) = args.jwt_secret {
         Ok(Some(secret.clone()))
     } else {
-        Ok(std::env::var("JWT_SECRET").ok())
+        Ok(std::env::var("APCORE_JWT_SECRET").ok())
     }
 }
 
@@ -856,18 +856,18 @@ mod tests {
     /// in a single test to avoid parallel env var races.
     #[test]
     fn resolve_jwt_key_env_and_none() {
-        // First: with JWT_SECRET set, resolve_jwt_key returns it.
+        // First: with APCORE_JWT_SECRET set, resolve_jwt_key returns it.
         // Safety: test-only env var manipulation.
         unsafe {
-            std::env::set_var("JWT_SECRET", "env-secret");
+            std::env::set_var("APCORE_JWT_SECRET", "env-secret");
         }
         let args = parse_args(&["apcore-mcp", "--extensions-dir", "/tmp"]).unwrap();
         let key = resolve_jwt_key(&args).unwrap();
         assert_eq!(key.as_deref(), Some("env-secret"));
 
-        // Second: without JWT_SECRET, resolve_jwt_key returns None.
+        // Second: without APCORE_JWT_SECRET, resolve_jwt_key returns None.
         unsafe {
-            std::env::remove_var("JWT_SECRET");
+            std::env::remove_var("APCORE_JWT_SECRET");
         }
         let args2 = parse_args(&["apcore-mcp", "--extensions-dir", "/tmp"]).unwrap();
         let key2 = resolve_jwt_key(&args2).unwrap();
