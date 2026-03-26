@@ -291,8 +291,14 @@ impl TransportManager {
                 let exempt = exempt.clone();
                 async move {
                     let path = req.uri().path().to_string();
-                    // Skip auth for exempt paths (health, metrics, explorer).
-                    if exempt.contains(&path) || path.starts_with("/explorer") || path == "/health" || path == "/metrics" {
+                    let method = req.method().clone();
+                    // Skip auth for health/metrics endpoints.
+                    if path == "/health" || path == "/metrics" || exempt.contains(&path) {
+                        return next.run(req).await;
+                    }
+                    // Explorer: GET requests (browsing UI) are exempt,
+                    // POST requests (tool execution) require auth.
+                    if path.starts_with("/explorer") && method == axum::http::Method::GET {
                         return next.run(req).await;
                     }
                     // Extract Authorization header.
