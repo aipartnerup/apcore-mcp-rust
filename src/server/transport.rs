@@ -263,10 +263,64 @@ impl TransportManager {
         port: u16,
         extra_routes: Option<Router>,
     ) -> Result<(), TransportError> {
+        self.run_streamable_http_with_auth(handler, host, port, extra_routes, None, None)
+            .await
+    }
+
+    /// Run the MCP server over streamable-HTTP transport with optional authentication.
+    pub async fn run_streamable_http_with_auth(
+        self: &Arc<Self>,
+        handler: Arc<dyn McpHandler>,
+        host: &str,
+        port: u16,
+        extra_routes: Option<Router>,
+        authenticator: Option<Arc<dyn crate::auth::protocol::Authenticator>>,
+        exempt_paths: Option<std::collections::HashSet<String>>,
+    ) -> Result<(), TransportError> {
         Self::validate_host_port(host, port)?;
         tracing::info!("Starting streamable-http transport on {}:{}", host, port);
 
-        let app = self.build_streamable_http_app(handler, extra_routes);
+        let mut app = self.build_streamable_http_app(handler, extra_routes);
+
+        // Apply auth middleware if an authenticator is provided.
+        if let Some(auth) = authenticator {
+            let exempt = exempt_paths.unwrap_or_default();
+            let require_auth = true;
+            app = app.layer(axum::middleware::from_fn(move |req: Request, next: axum::middleware::Next| {
+                let auth = Arc::clone(&auth);
+                let exempt = exempt.clone();
+                async move {
+                    let path = req.uri().path().to_string();
+                    // Skip auth for exempt paths (health, metrics, explorer).
+                    if exempt.contains(&path) || path.starts_with("/explorer") || path == "/health" || path == "/metrics" {
+                        return next.run(req).await;
+                    }
+                    // Extract Authorization header.
+                    let auth_header = req.headers()
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("");
+                    let mut headers = std::collections::HashMap::new();
+                    headers.insert("authorization".to_string(), auth_header.to_string());
+                    match auth.authenticate(&headers).await {
+                        Some(_identity) => next.run(req).await,
+                        None if !require_auth => next.run(req).await,
+                        None => {
+                            axum::response::Response::builder()
+                                .status(401)
+                                .header("WWW-Authenticate", "Bearer")
+                                .header("Content-Type", "application/json")
+                                .body(axum::body::Body::from(
+                                    r#"{"error":"unauthorized","message":"Missing or invalid Authorization header"}"#
+                                ))
+                                .unwrap()
+                        }
+                    }
+                }
+            }));
+        }
+
+        let app = app;
         let addr: std::net::SocketAddr = format!("{}:{}", host, port)
             .parse()
             .map_err(|_| TransportError::InvalidHost(host.to_string()))?;

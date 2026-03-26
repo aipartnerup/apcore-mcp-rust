@@ -240,10 +240,7 @@ pub struct APCoreMCP {
     /// an Executor (tool discovery goes through `executor.registry()`).
     standalone_registry: Option<Arc<Registry>>,
     executor: Arc<Executor>,
-    /// Reserved — accepted by builder but not yet wired into the transport
-    /// layer. Will be passed to `AuthMiddlewareLayer` once HTTP auth is
-    /// integrated into `serve()`.
-    #[allow(dead_code)]
+    /// Optional authenticator for HTTP transport auth middleware.
     authenticator: Option<Arc<dyn Authenticator>>,
     metrics_collector: Option<Arc<dyn MetricsExporter>>,
     /// Reserved — accepted by builder but not yet passed to
@@ -496,11 +493,13 @@ impl APCoreMCP {
             .block_on(async {
                 match transport.as_str() {
                     "streamable-http" => transport_manager
-                        .run_streamable_http(
+                        .run_streamable_http_with_auth(
                             Arc::clone(&handler),
                             &self.config.host,
                             self.config.port,
                             explorer_router,
+                            self.authenticator.clone(),
+                            self.config.exempt_paths.clone(),
                         )
                         .await
                         .map_err(|e| APCoreMCPError::ServerError(e.to_string())),
@@ -799,9 +798,7 @@ impl APCoreMCPBuilder {
         self
     }
 
-    /// Set the authenticator.
-    ///
-    /// **Note:** Reserved — not yet wired into the transport layer.
+    /// Set the authenticator for HTTP transport authentication.
     pub fn authenticator<A: Authenticator + 'static>(mut self, auth: A) -> Self {
         self.authenticator = Some(Arc::new(auth));
         self
