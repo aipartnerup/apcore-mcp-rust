@@ -57,4 +57,4 @@ path = "src/bin/apcore-mcp.rs"
 
 [[example]]
 name = "run"
-path = "examples/run.rs"
+path = "examples/run/main.rs"

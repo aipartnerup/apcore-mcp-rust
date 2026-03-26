@@ -18,7 +18,7 @@ use crate::auth::protocol::Authenticator;
 use crate::converters::openai::OpenAIConverter;
 use crate::explorer::{create_explorer_mount, ExplorerConfig, ToolInfo};
 use crate::server::factory::MCPServerFactory;
-use crate::server::router::{ExecutionRouter, OutputFormatter};
+use crate::server::router::{ExecutionRouter, ExecutorError, OutputFormatter};
 use crate::server::server::{MCPServer, ServerHandler};
 use crate::server::transport::{MetricsExporter, TransportManager};
 use crate::server::types::{InitializationOptions, Tool};
@@ -203,6 +203,33 @@ impl Default for APCoreMCPConfig {
 
 const VALID_LOG_LEVELS: &[&str] = &["CRITICAL", "DEBUG", "ERROR", "INFO", "WARNING"];
 
+// ---- Executor adapter -------------------------------------------------------
+
+/// Adapts `apcore::Executor` to the [`crate::server::router::Executor`] trait
+/// so that `ExecutionRouter` can dispatch MCP tool calls through it.
+struct ApcoreExecutorAdapter {
+    inner: Arc<Executor>,
+}
+
+#[async_trait::async_trait]
+impl crate::server::router::Executor for ApcoreExecutorAdapter {
+    async fn call_async(
+        &self,
+        module_id: &str,
+        inputs: &Value,
+        _context: Option<&Value>,
+    ) -> Result<Value, ExecutorError> {
+        self.inner
+            .call_async(module_id, inputs.clone(), None, None)
+            .await
+            .map_err(|e| ExecutorError::Execution {
+                code: format!("{:?}", e.code),
+                message: e.to_string(),
+                details: None,
+            })
+    }
+}
+
 // ---- APCoreMCP struct -------------------------------------------------------
 
 /// The main MCP bridge. Wraps an apcore registry and executor, exposing
@@ -311,10 +338,12 @@ impl APCoreMCP {
         let prefix = self.config.prefix.as_deref();
         let tools = factory.build_tools(self.reg(), tags_slice, prefix);
 
-        // Create execution router (stub for now since the adapter layer is not
-        // yet wired). Once a real executor is available, output_formatter and
-        // validate_inputs should be passed via ExecutionRouter::new_with_formatter.
-        let router = Arc::new(ExecutionRouter::new_with_formatter(
+        // Create execution router backed by the real apcore Executor.
+        let adapter = ApcoreExecutorAdapter {
+            inner: Arc::clone(&self.executor),
+        };
+        let router = Arc::new(ExecutionRouter::new(
+            Box::new(adapter),
             self.config.validate_inputs,
             None,
         ));
