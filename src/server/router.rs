@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_stream::Stream;
 
+use crate::auth::middleware::AUTH_IDENTITY;
 use crate::helpers::{ElicitResult, MCP_ELICIT_KEY, MCP_PROGRESS_KEY};
 
 /// A boxed stream of result chunks from a streaming executor.
@@ -186,8 +187,10 @@ pub struct CallExtra {
     pub send_notification: Option<SendNotificationFn>,
     /// Session handle for elicitation.
     pub session: Option<Arc<dyn SessionHandle>>,
-    /// Identity from auth middleware.
+    /// Identity from auth middleware (JSON form, legacy).
     pub identity: Option<Value>,
+    /// Typed identity from auth middleware for `apcore::Context` construction.
+    pub typed_identity: Option<apcore::Identity>,
 }
 
 /// Convert a [`ProgressToken`] to a JSON [`Value`].
@@ -216,6 +219,9 @@ pub struct ExecutionRouter {
     executor: Option<Box<dyn Executor>>,
     validate_inputs: bool,
     output_formatter: Option<OutputFormatter>,
+    /// Per-tool input schemas for `redact_sensitive` logging.
+    /// Keys are tool names, values are their JSON Schema definitions.
+    tool_schemas: HashMap<String, Value>,
 }
 
 impl ExecutionRouter {
@@ -229,6 +235,7 @@ impl ExecutionRouter {
             executor: None,
             validate_inputs: false,
             output_formatter: None,
+            tool_schemas: HashMap::new(),
         }
     }
 
@@ -244,6 +251,7 @@ impl ExecutionRouter {
             executor: None,
             validate_inputs,
             output_formatter,
+            tool_schemas: HashMap::new(),
         }
     }
 
@@ -262,6 +270,30 @@ impl ExecutionRouter {
             executor: Some(executor),
             validate_inputs,
             output_formatter,
+            tool_schemas: HashMap::new(),
+        }
+    }
+
+    /// Set the tool schemas used for `redact_sensitive` logging.
+    ///
+    /// Keys are tool names, values are their JSON Schema definitions.
+    /// When set, tool inputs are redacted before being logged at debug
+    /// level, replacing values marked with `x-sensitive: true`.
+    pub fn with_tool_schemas(mut self, schemas: HashMap<String, Value>) -> Self {
+        self.tool_schemas = schemas;
+        self
+    }
+
+    /// Redact sensitive fields from tool inputs for safe logging.
+    ///
+    /// If a schema is registered for `tool_name`, uses
+    /// `apcore::redact_sensitive` to replace `x-sensitive` fields with
+    /// `"***REDACTED***"`. Returns the original inputs unchanged when no
+    /// schema is available.
+    fn redact_inputs(&self, tool_name: &str, inputs: &Value) -> Value {
+        match self.tool_schemas.get(tool_name) {
+            Some(schema) => apcore::redact_sensitive(inputs, schema),
+            None => inputs.clone(),
         }
     }
 
@@ -339,7 +371,12 @@ impl ExecutionRouter {
         arguments: &Value,
         extra: Option<&Value>,
     ) -> (Vec<ContentItem>, bool, Option<String>) {
-        tracing::debug!("Executing tool call: {tool_name}");
+        let redacted = self.redact_inputs(tool_name, arguments);
+        tracing::debug!(
+            tool = tool_name,
+            inputs = %redacted,
+            "Executing tool call"
+        );
 
         // Extract streaming helpers and identity from extra
         let (progress_token, send_notification, session, identity) = Self::extract_extra(extra);
@@ -350,8 +387,9 @@ impl ExecutionRouter {
             send_notification,
             session,
             identity,
+            typed_identity: None,
         };
-        let (context_value, _context_data) = Self::build_context(&call_extra);
+        let (context_value, _context_data, _apcore_ctx) = Self::build_context(&call_extra);
 
         // Re-extract after building context (we moved them into CallExtra)
         let (progress_token, send_notification, _, _) = Self::extract_extra(extra);
@@ -428,17 +466,23 @@ impl ExecutionRouter {
         arguments: &Value,
         extra: Option<CallExtra>,
     ) -> (Vec<ContentItem>, bool, Option<String>) {
-        tracing::debug!("Executing tool call: {tool_name}");
+        let redacted = self.redact_inputs(tool_name, arguments);
+        tracing::debug!(
+            tool = tool_name,
+            inputs = %redacted,
+            "Executing tool call"
+        );
 
         let extra = extra.unwrap_or_else(|| CallExtra {
             progress_token: None,
             send_notification: None,
             session: None,
             identity: None,
+            typed_identity: None,
         });
 
         // Build per-call context
-        let (context_value, _context_data) = Self::build_context(&extra);
+        let (context_value, _context_data, _apcore_ctx) = Self::build_context(&extra);
 
         // Pre-execution validation
         if self.validate_inputs {
@@ -479,17 +523,46 @@ impl ExecutionRouter {
 
     /// Build execution context with MCP callbacks and identity.
     ///
-    /// Constructs a JSON context value and, if callbacks are present,
-    /// stores them under `MCP_PROGRESS_KEY` / `MCP_ELICIT_KEY` in the
-    /// returned data map.
+    /// Constructs a JSON context value and an `apcore::Context<Value>`.
+    /// If callbacks are present, stores them under `MCP_PROGRESS_KEY` /
+    /// `MCP_ELICIT_KEY` in both the side-channel data map (as actual
+    /// callback objects) and in `apcore_ctx.data` (as marker values so
+    /// modules can detect availability).
     ///
-    /// Returns `(context_value, context_data)` where `context_data` holds
-    /// the callback objects that cannot be serialized into JSON.
+    /// Returns `(context_value, context_data, apcore_context)` where
+    /// `context_data` holds the callback objects that cannot be serialized
+    /// into JSON, and `apcore_context` is the proper apcore `Context`.
     fn build_context(
         extra: &CallExtra,
-    ) -> (Value, HashMap<String, Box<dyn std::any::Any + Send + Sync>>) {
+    ) -> (
+        Value,
+        HashMap<String, Box<dyn std::any::Any + Send + Sync>>,
+        apcore::Context<Value>,
+    ) {
         let mut data: HashMap<String, Box<dyn std::any::Any + Send + Sync>> = HashMap::new();
         let mut context_obj = serde_json::Map::new();
+
+        // Resolve identity: prefer typed_identity, then try deserializing
+        // the JSON identity, then try reading the AUTH_IDENTITY task-local.
+        let resolved_identity: Option<apcore::Identity> = extra
+            .typed_identity
+            .clone()
+            .or_else(|| {
+                extra
+                    .identity
+                    .as_ref()
+                    .and_then(|v| serde_json::from_value::<apcore::Identity>(v.clone()).ok())
+            })
+            .or_else(|| AUTH_IDENTITY.try_with(|id| id.clone()).ok().flatten());
+
+        // Construct apcore::Context with or without identity
+        let apcore_ctx: apcore::Context<Value> = match resolved_identity {
+            Some(ref identity) => apcore::Context::new(identity.clone()),
+            None => apcore::Context::anonymous(),
+        };
+
+        let has_progress = extra.progress_token.is_some() && extra.send_notification.is_some();
+        let has_elicit = extra.session.is_some();
 
         // Inject progress callback
         if let (Some(ref token), Some(ref send_notification)) =
@@ -546,18 +619,37 @@ impl ExecutionRouter {
             data.insert(MCP_ELICIT_KEY.to_string(), Box::new(elicit_cb));
         }
 
-        // Set identity
-        if let Some(ref identity) = extra.identity {
-            context_obj.insert("identity".to_string(), identity.clone());
+        // Write marker values into apcore Context.data so modules can
+        // detect callback availability. Actual callbacks live in the
+        // side-channel `data` map since serde_json::Value cannot hold
+        // function pointers.
+        {
+            let mut shared = apcore_ctx.data.write().unwrap_or_else(|e| e.into_inner());
+            if has_progress {
+                shared.insert(MCP_PROGRESS_KEY.to_string(), serde_json::json!("available"));
+            }
+            if has_elicit {
+                shared.insert(MCP_ELICIT_KEY.to_string(), serde_json::json!("available"));
+            }
         }
 
-        // Set trace_id
+        // Set identity in JSON context (legacy path)
+        if let Some(ref identity) = extra.identity {
+            context_obj.insert("identity".to_string(), identity.clone());
+        } else if let Some(ref identity) = resolved_identity {
+            // Serialize the resolved identity into the JSON context
+            if let Ok(val) = serde_json::to_value(identity) {
+                context_obj.insert("identity".to_string(), val);
+            }
+        }
+
+        // Set trace_id (use the one from apcore_ctx for consistency)
         context_obj.insert(
             "trace_id".to_string(),
-            Value::String(uuid::Uuid::new_v4().to_string()),
+            Value::String(apcore_ctx.trace_id.clone()),
         );
 
-        (Value::Object(context_obj), data)
+        (Value::Object(context_obj), data, apcore_ctx)
     }
 
     // -----------------------------------------------------------------------
@@ -1056,6 +1148,7 @@ mod tests {
             executor: None,
             validate_inputs: false,
             output_formatter: Some(formatter),
+            tool_schemas: HashMap::new(),
         };
         let result = router.format_result(&json!({"a": 1, "b": 2}));
         assert_eq!(result, "custom: 2 keys");
@@ -1068,6 +1161,7 @@ mod tests {
             executor: None,
             validate_inputs: false,
             output_formatter: Some(formatter),
+            tool_schemas: HashMap::new(),
         };
         // Non-object values should fall back to JSON
         assert_eq!(router.format_result(&json!("string")), r#""string""#);
@@ -1082,6 +1176,7 @@ mod tests {
             executor: None,
             validate_inputs: false,
             output_formatter: Some(formatter),
+            tool_schemas: HashMap::new(),
         };
         // Should fall back to JSON when formatter returns an error
         let result = router.format_result(&json!({"key": "value"}));
@@ -1142,8 +1237,9 @@ mod tests {
             send_notification: Some(sn),
             session: None,
             identity: None,
+            typed_identity: None,
         };
-        let (_, data) = ExecutionRouter::build_context(&extra);
+        let (_, data, _) = ExecutionRouter::build_context(&extra);
         assert!(data.contains_key(MCP_PROGRESS_KEY));
     }
 
@@ -1154,8 +1250,9 @@ mod tests {
             send_notification: None,
             session: None,
             identity: None,
+            typed_identity: None,
         };
-        let (_, data) = ExecutionRouter::build_context(&extra);
+        let (_, data, _) = ExecutionRouter::build_context(&extra);
         assert!(!data.contains_key(MCP_PROGRESS_KEY));
     }
 
@@ -1172,8 +1269,9 @@ mod tests {
             send_notification: None,
             session: Some(session),
             identity: None,
+            typed_identity: None,
         };
-        let (_, data) = ExecutionRouter::build_context(&extra);
+        let (_, data, _) = ExecutionRouter::build_context(&extra);
         assert!(data.contains_key(MCP_ELICIT_KEY));
     }
 
@@ -1184,8 +1282,9 @@ mod tests {
             send_notification: None,
             session: None,
             identity: None,
+            typed_identity: None,
         };
-        let (_, data) = ExecutionRouter::build_context(&extra);
+        let (_, data, _) = ExecutionRouter::build_context(&extra);
         assert!(!data.contains_key(MCP_ELICIT_KEY));
     }
 
@@ -1197,8 +1296,9 @@ mod tests {
             send_notification: None,
             session: None,
             identity: Some(identity.clone()),
+            typed_identity: None,
         };
-        let (ctx, _) = ExecutionRouter::build_context(&extra);
+        let (ctx, _, _) = ExecutionRouter::build_context(&extra);
         assert_eq!(ctx["identity"], identity);
     }
 
@@ -1209,9 +1309,224 @@ mod tests {
             send_notification: None,
             session: None,
             identity: None,
+            typed_identity: None,
         };
-        let (ctx, _) = ExecutionRouter::build_context(&extra);
+        let (ctx, _, _) = ExecutionRouter::build_context(&extra);
         assert!(ctx.get("identity").is_none());
+    }
+
+    // ==================================================================
+    // apcore::Context construction and identity propagation tests
+    // ==================================================================
+
+    #[test]
+    fn test_build_context_creates_apcore_context_anonymous() {
+        let extra = CallExtra {
+            progress_token: None,
+            send_notification: None,
+            session: None,
+            identity: None,
+            typed_identity: None,
+        };
+        let (_, _, apcore_ctx) = ExecutionRouter::build_context(&extra);
+        assert!(apcore_ctx.identity.is_none());
+        assert!(!apcore_ctx.trace_id.is_empty());
+    }
+
+    #[test]
+    fn test_build_context_creates_apcore_context_with_typed_identity() {
+        let identity = apcore::Identity {
+            id: "user-42".to_string(),
+            identity_type: "human".to_string(),
+            roles: vec!["admin".to_string()],
+            attrs: Default::default(),
+        };
+        let extra = CallExtra {
+            progress_token: None,
+            send_notification: None,
+            session: None,
+            identity: None,
+            typed_identity: Some(identity.clone()),
+        };
+        let (_, _, apcore_ctx) = ExecutionRouter::build_context(&extra);
+        let ctx_id = apcore_ctx
+            .identity
+            .as_ref()
+            .expect("identity should be set");
+        assert_eq!(ctx_id.id, "user-42");
+        assert_eq!(ctx_id.identity_type, "human");
+        assert_eq!(ctx_id.roles, vec!["admin"]);
+    }
+
+    #[test]
+    fn test_build_context_deserializes_json_identity_into_apcore_context() {
+        let identity_json = json!({
+            "id": "svc-1",
+            "type": "service",
+            "roles": ["reader"]
+        });
+        let extra = CallExtra {
+            progress_token: None,
+            send_notification: None,
+            session: None,
+            identity: Some(identity_json),
+            typed_identity: None,
+        };
+        let (_, _, apcore_ctx) = ExecutionRouter::build_context(&extra);
+        let ctx_id = apcore_ctx
+            .identity
+            .as_ref()
+            .expect("identity should be set");
+        assert_eq!(ctx_id.id, "svc-1");
+        assert_eq!(ctx_id.identity_type, "service");
+    }
+
+    #[test]
+    fn test_build_context_typed_identity_takes_precedence() {
+        let typed = apcore::Identity {
+            id: "typed-user".to_string(),
+            identity_type: "human".to_string(),
+            roles: vec![],
+            attrs: Default::default(),
+        };
+        let json_identity = json!({
+            "id": "json-user",
+            "type": "service",
+            "roles": []
+        });
+        let extra = CallExtra {
+            progress_token: None,
+            send_notification: None,
+            session: None,
+            identity: Some(json_identity),
+            typed_identity: Some(typed),
+        };
+        let (_, _, apcore_ctx) = ExecutionRouter::build_context(&extra);
+        let ctx_id = apcore_ctx.identity.as_ref().unwrap();
+        assert_eq!(
+            ctx_id.id, "typed-user",
+            "typed_identity should take precedence"
+        );
+    }
+
+    #[test]
+    fn test_build_context_writes_progress_marker_to_apcore_data() {
+        let (sn, _) = make_send_notification();
+        let extra = CallExtra {
+            progress_token: Some(ProgressToken::String("tok".into())),
+            send_notification: Some(sn),
+            session: None,
+            identity: None,
+            typed_identity: None,
+        };
+        let (_, _, apcore_ctx) = ExecutionRouter::build_context(&extra);
+        let data = apcore_ctx.data.read().unwrap();
+        assert_eq!(data.get(MCP_PROGRESS_KEY), Some(&json!("available")));
+        assert!(!data.contains_key(MCP_ELICIT_KEY));
+    }
+
+    #[test]
+    fn test_build_context_writes_elicit_marker_to_apcore_data() {
+        let session = Arc::new(MockSession {
+            result: ElicitResult {
+                action: crate::helpers::ElicitAction::Accept,
+                content: None,
+            },
+        });
+        let extra = CallExtra {
+            progress_token: None,
+            send_notification: None,
+            session: Some(session),
+            identity: None,
+            typed_identity: None,
+        };
+        let (_, _, apcore_ctx) = ExecutionRouter::build_context(&extra);
+        let data = apcore_ctx.data.read().unwrap();
+        assert_eq!(data.get(MCP_ELICIT_KEY), Some(&json!("available")));
+        assert!(!data.contains_key(MCP_PROGRESS_KEY));
+    }
+
+    #[test]
+    fn test_build_context_no_markers_when_no_callbacks() {
+        let extra = CallExtra {
+            progress_token: None,
+            send_notification: None,
+            session: None,
+            identity: None,
+            typed_identity: None,
+        };
+        let (_, _, apcore_ctx) = ExecutionRouter::build_context(&extra);
+        let data = apcore_ctx.data.read().unwrap();
+        assert!(data.is_empty());
+    }
+
+    #[test]
+    fn test_build_context_trace_id_consistent() {
+        let extra = CallExtra {
+            progress_token: None,
+            send_notification: None,
+            session: None,
+            identity: None,
+            typed_identity: None,
+        };
+        let (ctx_value, _, apcore_ctx) = ExecutionRouter::build_context(&extra);
+        let json_trace = ctx_value["trace_id"].as_str().unwrap();
+        assert_eq!(json_trace, &apcore_ctx.trace_id);
+    }
+
+    // ==================================================================
+    // redact_sensitive logging tests
+    // ==================================================================
+
+    #[test]
+    fn test_redact_inputs_no_schema() {
+        let router = ExecutionRouter::stub();
+        let inputs = json!({"password": "secret", "name": "Alice"});
+        let redacted = router.redact_inputs("unknown_tool", &inputs);
+        // Without schema, inputs are returned as-is
+        assert_eq!(redacted, inputs);
+    }
+
+    #[test]
+    fn test_redact_inputs_with_sensitive_schema() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "password": {"type": "string", "x-sensitive": true},
+                "name": {"type": "string"}
+            }
+        });
+        let mut schemas = HashMap::new();
+        schemas.insert("my_tool".to_string(), schema);
+
+        let router = ExecutionRouter::stub().with_tool_schemas(schemas);
+        let inputs = json!({"password": "secret123", "name": "Alice"});
+        let redacted = router.redact_inputs("my_tool", &inputs);
+
+        assert_eq!(redacted["name"], "Alice");
+        assert_eq!(redacted["password"], apcore::REDACTED_VALUE);
+    }
+
+    #[test]
+    fn test_redact_inputs_secret_prefix_key() {
+        let schema = json!({"type": "object", "properties": {}});
+        let mut schemas = HashMap::new();
+        schemas.insert("my_tool".to_string(), schema);
+
+        let router = ExecutionRouter::stub().with_tool_schemas(schemas);
+        let inputs = json!({"_secret_token": "abc", "name": "Bob"});
+        let redacted = router.redact_inputs("my_tool", &inputs);
+
+        assert_eq!(redacted["name"], "Bob");
+        assert_eq!(redacted["_secret_token"], apcore::REDACTED_VALUE);
+    }
+
+    #[test]
+    fn test_with_tool_schemas_builder() {
+        let mut schemas = HashMap::new();
+        schemas.insert("tool_a".to_string(), json!({"type": "object"}));
+        let router = ExecutionRouter::stub().with_tool_schemas(schemas);
+        assert!(router.tool_schemas.contains_key("tool_a"));
     }
 
     #[tokio::test]
@@ -1222,8 +1537,9 @@ mod tests {
             send_notification: Some(sn),
             session: None,
             identity: None,
+            typed_identity: None,
         };
-        let (_, data) = ExecutionRouter::build_context(&extra);
+        let (_, data, _) = ExecutionRouter::build_context(&extra);
         let cb = data
             .get(MCP_PROGRESS_KEY)
             .unwrap()
@@ -1247,8 +1563,9 @@ mod tests {
             send_notification: Some(sn),
             session: None,
             identity: None,
+            typed_identity: None,
         };
-        let (_, data) = ExecutionRouter::build_context(&extra);
+        let (_, data, _) = ExecutionRouter::build_context(&extra);
         let cb = data
             .get(MCP_PROGRESS_KEY)
             .unwrap()
@@ -1268,8 +1585,9 @@ mod tests {
             send_notification: Some(sn),
             session: None,
             identity: None,
+            typed_identity: None,
         };
-        let (_, data) = ExecutionRouter::build_context(&extra);
+        let (_, data, _) = ExecutionRouter::build_context(&extra);
         let cb = data
             .get(MCP_PROGRESS_KEY)
             .unwrap()
@@ -1295,8 +1613,9 @@ mod tests {
             send_notification: None,
             session: Some(session),
             identity: None,
+            typed_identity: None,
         };
-        let (_, data) = ExecutionRouter::build_context(&extra);
+        let (_, data, _) = ExecutionRouter::build_context(&extra);
         let cb = data
             .get(MCP_ELICIT_KEY)
             .unwrap()
@@ -2000,6 +2319,7 @@ mod tests {
             send_notification: Some(sn),
             session: None,
             identity: None,
+            typed_identity: None,
         };
         let (content, is_error, _) = router
             .handle_call_with_extra("mod", &json!({}), Some(extra))
@@ -2024,6 +2344,7 @@ mod tests {
             send_notification: None,
             session: None,
             identity: None,
+            typed_identity: None,
         };
         let (content, is_error, _) = router
             .handle_call_with_extra("mod", &json!({"x": 1}), Some(extra))
@@ -2045,6 +2366,7 @@ mod tests {
             send_notification: Some(sn),
             session: None,
             identity: None,
+            typed_identity: None,
         };
         let (content, is_error, _) = router
             .handle_call_with_extra("test.module", &json!({}), Some(extra))
@@ -2089,6 +2411,7 @@ mod tests {
             send_notification: None,
             session: None,
             identity: Some(identity),
+            typed_identity: None,
         };
         // Use IdentityCapturingExecutor to verify
         let router = ExecutionRouter::new(Box::new(IdentityCapturingExecutor), false, None);
@@ -2337,6 +2660,7 @@ mod tests {
             send_notification: None,
             session: None,
             identity: Some(json!({"user": "alice", "role": "admin"})),
+            typed_identity: None,
         };
         let (content, is_error, _) = router
             .handle_call_with_extra("mod", &json!({}), Some(extra))
@@ -2362,6 +2686,7 @@ mod tests {
             send_notification: Some(sn),
             session: None,
             identity: None,
+            typed_identity: None,
         };
         let (content, is_error, _) = router
             .handle_call_with_extra("mod", &json!({}), Some(extra))
@@ -2387,6 +2712,7 @@ mod tests {
             send_notification: Some(sn),
             session: None,
             identity: None,
+            typed_identity: None,
         };
         router
             .handle_call_with_extra("mod", &json!({}), Some(extra))
@@ -2420,6 +2746,7 @@ mod tests {
             send_notification: Some(sn),
             session: None,
             identity: None,
+            typed_identity: None,
         };
         let (content, is_error, _) = router
             .handle_call_with_extra("mod", &json!({}), Some(extra))
@@ -2441,6 +2768,7 @@ mod tests {
             send_notification: Some(sn),
             session: None,
             identity: None,
+            typed_identity: None,
         };
         let (content, is_error, _) = router
             .handle_call_with_extra("mod", &json!({}), Some(extra))
@@ -2553,8 +2881,9 @@ mod tests {
             send_notification: Some(sn),
             session: None,
             identity: None,
+            typed_identity: None,
         };
-        let (_, data) = ExecutionRouter::build_context(&extra);
+        let (_, data, _) = ExecutionRouter::build_context(&extra);
         assert!(data.contains_key(MCP_PROGRESS_KEY));
     }
 
@@ -2571,8 +2900,9 @@ mod tests {
             send_notification: None,
             session: Some(session),
             identity: None,
+            typed_identity: None,
         };
-        let (_, data) = ExecutionRouter::build_context(&extra);
+        let (_, data, _) = ExecutionRouter::build_context(&extra);
         assert!(data.contains_key(MCP_ELICIT_KEY));
     }
 }
