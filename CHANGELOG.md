@@ -5,10 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.11.1] - 2026-03-28
+## [0.11.1] - 2026-03-29
+
+### Added
+- **Context.data callback injection** — `build_context()` now constructs a proper `apcore::Context<Value>` and injects MCP callback markers (`_mcp_progress`, `_mcp_elicit`) into `Context.data` (SharedData). Actual callbacks stored in a side-channel `HashMap<String, Box<dyn Any>>` since `serde_json::Value` cannot hold function pointers. Modules can detect callback availability via marker values.
+- **Identity propagation** — `build_context()` resolves identity with a priority chain: `CallExtra.typed_identity` > deserialized JSON identity > `AUTH_IDENTITY` task-local from auth middleware. Resolved identity is used with `Context::new(identity)` or `Context::anonymous()`.
+- **`redact_sensitive()` logging** — Added `tool_schemas` field and `with_tool_schemas()` builder method to `ExecutionRouter`. Tool inputs are redacted via `apcore::redact_sensitive()` before debug logging, replacing `x-sensitive: true` fields and `_secret_*` prefixed keys with `***REDACTED***`.
+- **`CallExtra.typed_identity`** field for direct typed identity injection (bypasses JSON deserialization).
+- 12 new tests: `build_context` identity resolution (4), callback marker injection (4), redact_sensitive (3), builder (1).
 
 ### Changed
-- Bump apcore dependency to 0.14 and update package version to 0.11.1
+- `build_context()` now returns a 3-tuple `(context_value, callback_data, apcore_context)` instead of a 2-tuple, providing the constructed `apcore::Context` for downstream use.
+- JSON context `trace_id` is now taken from the `apcore::Context` for consistency.
+
+- Bump apcore dependency from 0.13 to 0.14. All 694 tests pass without code changes — apcore 0.14 breaking changes (Context.identity optional, SharedData, middleware priority default 100) are backward-compatible for apcore-mcp.
 
 ## [0.11.0] - 2026-03-26
 
@@ -71,6 +81,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `src/explorer/api.rs` — ExplorerState, API handlers, and CallResponse (replaced by `mcp-embedded-ui`).
 - `src/explorer/templates.rs` — HTML template rendering (replaced by `mcp-embedded-ui`).
 
+[0.11.2]: https://github.com/aiperceivable/apcore-mcp-rust/compare/v0.11.1...v0.11.2
+[0.11.1]: https://github.com/aiperceivable/apcore-mcp-rust/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/aiperceivable/apcore-mcp-rust/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/aiperceivable/apcore-mcp-rust/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/aiperceivable/apcore-mcp-rust/releases/tag/v0.10.0
