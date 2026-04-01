@@ -48,6 +48,12 @@ pub enum ErrorCode {
     VersionIncompatible,
     ErrorCodeCollision,
     ExecutionCancelled,
+    ConfigNamespaceDuplicate,
+    ConfigNamespaceReserved,
+    ConfigEnvPrefixConflict,
+    ConfigMountError,
+    ConfigBindError,
+    ErrorFormatterDuplicate,
 }
 
 /// Registry lifecycle events.
@@ -72,6 +78,23 @@ impl RegistryEvent {
             Self::Unregister => "UNREGISTER",
         }
     }
+}
+
+/// Dot-namespaced event types introduced in apcore 0.15.0 (§9.16).
+///
+/// These constants provide canonical event type names for the apcore event system.
+/// The `RegistryListener` uses callback-based `registry.on("register")` which is
+/// unaffected by these names — they are for consumer use when subscribing to the
+/// apcore `EventEmitter`.
+pub mod apcore_events {
+    /// Module toggled on/off (replaces legacy `"module_health_changed"` for toggles).
+    pub const MODULE_TOGGLED: &str = "apcore.module.toggled";
+    /// Module hot-reloaded (replaces legacy `"config_changed"` for reloads).
+    pub const MODULE_RELOADED: &str = "apcore.module.reloaded";
+    /// Runtime config key updated (replaces legacy `"config_changed"` for updates).
+    pub const CONFIG_UPDATED: &str = "apcore.config.updated";
+    /// Error rate recovered below threshold.
+    pub const HEALTH_RECOVERED: &str = "apcore.health.recovered";
 }
 
 /// Regex pattern for valid module IDs.
@@ -124,7 +147,7 @@ mod tests {
 
     #[test]
     fn error_code_count() {
-        assert_eq!(ErrorCode::iter().count(), 18);
+        assert_eq!(ErrorCode::iter().count(), 24);
     }
 
     #[test]
@@ -239,6 +262,12 @@ mod tests {
             "VERSION_INCOMPATIBLE",
             "ERROR_CODE_COLLISION",
             "EXECUTION_CANCELLED",
+            "CONFIG_NAMESPACE_DUPLICATE",
+            "CONFIG_NAMESPACE_RESERVED",
+            "CONFIG_ENV_PREFIX_CONFLICT",
+            "CONFIG_MOUNT_ERROR",
+            "CONFIG_BIND_ERROR",
+            "ERROR_FORMATTER_DUPLICATE",
         ];
         for code_str in &python_codes {
             let parsed: ErrorCode = code_str

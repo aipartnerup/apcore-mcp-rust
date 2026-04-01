@@ -945,6 +945,10 @@ impl APCoreMCPBuilder {
             }
         }
 
+        // Register MCP config namespace and error formatter (idempotent)
+        crate::config::register_mcp_namespace();
+        crate::adapters::errors::register_mcp_error_formatter();
+
         // Resolve backend into (registry, executor) pair.
         let backend = self.backend.ok_or_else(|| {
             APCoreMCPError::BackendResolution("backend source is required".to_string())

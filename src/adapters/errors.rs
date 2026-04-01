@@ -266,6 +266,30 @@ fn error_code_to_string(code: &ApcoreErrorCode) -> String {
         .unwrap_or_else(|| format!("{code:?}"))
 }
 
+// ---- MCP Error Formatter for apcore ErrorFormatterRegistry (§8.8) ----------
+
+use apcore::error_formatter::{ErrorFormatter as ApcoreErrorFormatter, ErrorFormatterRegistry};
+
+/// MCP-specific error formatter for the apcore ErrorFormatterRegistry.
+///
+/// Wraps [`ErrorMapper::to_mcp_error`] for use with the shared registry.
+pub struct McpErrorFormatter;
+
+impl ApcoreErrorFormatter for McpErrorFormatter {
+    fn format(&self, error: &ModuleError, _context: Option<&dyn std::any::Any>) -> Value {
+        serde_json::to_value(ErrorMapper::to_mcp_error(error)).unwrap_or_else(|_| error.to_dict())
+    }
+}
+
+/// Register the MCP error formatter with apcore's ErrorFormatterRegistry.
+///
+/// Safe to call multiple times — ignores duplicate registration.
+pub fn register_mcp_error_formatter() {
+    if !ErrorFormatterRegistry::is_registered("mcp") {
+        let _ = ErrorFormatterRegistry::register("mcp", Box::new(McpErrorFormatter));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,6 +529,23 @@ mod tests {
         assert_eq!(resp.error_type, "MODULE_EXECUTE_ERROR");
         assert_eq!(resp.message, "division by zero");
         assert!(resp.details.is_some());
+    }
+
+    // ---- MCP Error Formatter ----
+
+    #[test]
+    fn test_mcp_error_formatter_format() {
+        let error = ModuleError::new(ApcoreErrorCode::GeneralInternalError, "test");
+        let formatter = McpErrorFormatter;
+        let result = ApcoreErrorFormatter::format(&formatter, &error, None);
+        assert!(result.is_object());
+        assert_eq!(result.get("isError").and_then(|v| v.as_bool()), Some(true));
+    }
+
+    #[test]
+    fn test_register_mcp_error_formatter_idempotent() {
+        register_mcp_error_formatter();
+        register_mcp_error_formatter(); // Should not panic
     }
 
     // ---- camelCase output keys ----

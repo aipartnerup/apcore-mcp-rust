@@ -9,6 +9,7 @@ pub mod adapters;
 pub mod apcore_mcp;
 pub mod auth;
 pub mod cli;
+pub mod config;
 pub mod constants;
 pub mod converters;
 pub mod explorer;
@@ -17,7 +18,7 @@ pub mod server;
 mod utils;
 
 /// Crate version, kept in sync with Cargo.toml.
-pub const VERSION: &str = "0.11.0";
+pub const VERSION: &str = "0.12.0";
 
 // ---- Re-exports: core bridge ------------------------------------------------
 pub use crate::apcore_mcp::{
@@ -44,12 +45,17 @@ pub use crate::server::server::{MCPServer, MCPServerConfig, RegistryOrExecutor, 
 pub use crate::server::transport::TransportManager;
 
 // ---- Re-exports: adapters ---------------------------------------------------
+pub use crate::adapters::register_mcp_error_formatter;
 pub use crate::adapters::AdapterError;
 pub use crate::adapters::AnnotationMapper;
 pub use crate::adapters::ElicitationApprovalHandler;
 pub use crate::adapters::ErrorMapper;
+pub use crate::adapters::McpErrorFormatter;
 pub use crate::adapters::ModuleIDNormalizer;
 pub use crate::adapters::SchemaConverter;
+
+// ---- Re-exports: config bus -------------------------------------------------
+pub use crate::config::{mcp_defaults, register_mcp_namespace, MCP_ENV_PREFIX, MCP_NAMESPACE};
 
 // ---- Re-exports: converters -------------------------------------------------
 pub use crate::converters::openai::{ConverterError, OpenAIConverter};

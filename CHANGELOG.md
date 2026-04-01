@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-03-31
+
+### Added
+
+- **Config Bus namespace registration** (F-033) — Registers `mcp` namespace with apcore Config Bus (`APCORE_MCP` env prefix) during `APCoreMCPBuilder::build()`. MCP configuration (transport, host, port, auth, explorer) can be managed via unified `apcore.yaml`.
+- **Error Formatter Registry integration** (F-034) — `McpErrorFormatter` registered with apcore's `ErrorFormatterRegistry`, formalizing MCP error formatting into the shared protocol.
+- **Dot-namespaced event constants** (F-035) — `apcore_events` module with canonical event type constants from apcore 0.15.0 (§9.16).
+- **6 new error code variants** — `ConfigNamespaceDuplicate`, `ConfigNamespaceReserved`, `ConfigEnvPrefixConflict`, `ConfigMountError`, `ConfigBindError`, `ErrorFormatterDuplicate`.
+
+### Changed
+
+- Dependency bump: requires `apcore 0.15.1` (was `0.14`) for Config Bus (§9.4), Error Formatter Registry (§8.8), and dot-namespaced event types (§9.16).
+
+---
+
 ## [0.11.1] - 2026-03-29
 
 ### Added
