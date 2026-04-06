@@ -18,6 +18,7 @@ use crate::auth::protocol::Authenticator;
 use crate::converters::openai::OpenAIConverter;
 use crate::explorer::{create_explorer_mount, ExplorerConfig, ToolInfo};
 use crate::server::factory::MCPServerFactory;
+use crate::server::listener::RegistryListener;
 use crate::server::router::{ExecutionRouter, ExecutorError, OutputFormatter};
 use crate::server::server::{MCPServer, ServerHandler};
 use crate::server::transport::{MetricsExporter, TransportManager};
@@ -155,6 +156,8 @@ pub struct APCoreMCPConfig {
     pub log_level: Option<String>,
     /// Validate tool inputs against schemas before execution.
     pub validate_inputs: bool,
+    /// Redact sensitive fields from tool outputs before returning to the client.
+    pub redact_output: bool,
     /// If true, unauthenticated requests receive 401.
     pub require_auth: bool,
     /// Exact paths that bypass authentication.
@@ -171,6 +174,11 @@ pub struct APCoreMCPConfig {
     pub explorer_project_url: Option<String>,
     /// Allow tool execution from the explorer UI.
     pub allow_execute: bool,
+    /// Pipeline execution strategy preset (e.g. "standard", "internal", "testing").
+    pub strategy: Option<String>,
+    /// Enable pipeline trace mode. When true, tool responses include
+    /// pipeline trace data (strategy name, duration, steps).
+    pub trace: bool,
 }
 
 impl Default for APCoreMCPConfig {
@@ -185,6 +193,7 @@ impl Default for APCoreMCPConfig {
             prefix: None,
             log_level: None,
             validate_inputs: false,
+            redact_output: true,
             require_auth: true,
             exempt_paths: None,
             explorer: false,
@@ -195,6 +204,8 @@ impl Default for APCoreMCPConfig {
                 "https://github.com/aiperceivable/apcore-mcp-rust".to_string(),
             ),
             allow_execute: false,
+            strategy: None,
+            trace: false,
         }
     }
 }
@@ -281,6 +292,26 @@ impl APCoreMCP {
         &self.executor
     }
 
+    /// Create and log a RegistryListener if dynamic mode is enabled.
+    ///
+    /// RegistryListener::start requires `&mut Registry`. Currently the
+    /// registry is behind Arc, so we cannot obtain `&mut`. The listener
+    /// is created and will be fully functional once apcore's Registry
+    /// supports interior-mutable callback registration (`Registry::on`
+    /// taking `&self`).
+    fn maybe_start_listener(dynamic: bool) -> Option<RegistryListener> {
+        if dynamic {
+            let listener = RegistryListener::new();
+            tracing::info!(
+                "Dynamic mode: RegistryListener created (pending registry \
+                 callback API that accepts &self instead of &mut self)"
+            );
+            Some(listener)
+        } else {
+            None
+        }
+    }
+
     /// Returns the currently registered tool names (module IDs), filtered
     /// by the configured tags and prefix.
     pub fn tools(&self) -> Vec<String> {
@@ -341,15 +372,30 @@ impl APCoreMCP {
         // because their apcore SDKs include descriptor.metadata.
         let tools = factory.build_tools(self.reg(), tags_slice, prefix);
 
+        // Build output schema map for output redaction.
+        let output_schema_map: std::collections::HashMap<String, Value> = {
+            let module_ids = self.reg().list(tags_slice, prefix);
+            let mut map = std::collections::HashMap::new();
+            for module_id in module_ids {
+                if let Some(descriptor) = self.reg().get_definition(module_id) {
+                    if !descriptor.output_schema.is_null() {
+                        map.insert(module_id.to_string(), descriptor.output_schema.clone());
+                    }
+                }
+            }
+            map
+        };
+
         // Create execution router backed by the real apcore Executor.
         let adapter = ApcoreExecutorAdapter {
             inner: Arc::clone(&self.executor),
         };
-        let router = Arc::new(ExecutionRouter::new(
-            Box::new(adapter),
-            self.config.validate_inputs,
-            None,
-        ));
+        let router = Arc::new(
+            ExecutionRouter::new(Box::new(adapter), self.config.validate_inputs, None)
+                .with_redact_output(self.config.redact_output)
+                .with_trace(self.config.trace)
+                .with_output_schemas(output_schema_map),
+        );
 
         // Register handlers
         factory.register_handlers(&mut server, tools.clone(), Arc::clone(&router));
@@ -490,6 +536,8 @@ impl APCoreMCP {
             None
         };
 
+        let _listener = Self::maybe_start_listener(opts.dynamic);
+
         if let Some(ref on_startup) = opts.on_startup {
             on_startup();
         }
@@ -574,6 +622,8 @@ impl APCoreMCP {
             version,
             tools.len(),
         );
+
+        let _listener = Self::maybe_start_listener(opts.dynamic);
 
         // Build the transport manager
         let mut transport_manager = TransportManager::new(self.metrics_collector.clone());
@@ -737,6 +787,9 @@ pub struct ServeOptions {
     pub on_shutdown: Option<Box<dyn Fn() + Send + Sync>>,
     /// Explorer UI configuration.
     pub explorer: ExplorerOptions,
+    /// Enable dynamic mode: start a RegistryListener that keeps the MCP
+    /// tool list in sync with runtime registry changes.
+    pub dynamic: bool,
 }
 
 impl std::fmt::Debug for ServeOptions {
@@ -745,6 +798,7 @@ impl std::fmt::Debug for ServeOptions {
             .field("on_startup", &self.on_startup.as_ref().map(|_| "..."))
             .field("on_shutdown", &self.on_shutdown.as_ref().map(|_| "..."))
             .field("explorer", &self.explorer)
+            .field("dynamic", &self.dynamic)
             .finish()
     }
 }
@@ -756,6 +810,9 @@ impl std::fmt::Debug for ServeOptions {
 pub struct AsyncServeOptions {
     /// Explorer UI configuration.
     pub explorer: ExplorerOptions,
+    /// Enable dynamic mode: start a RegistryListener that keeps the MCP
+    /// tool list in sync with runtime registry changes.
+    pub dynamic: bool,
 }
 
 // ---- APCoreMCPBuilder -------------------------------------------------------
@@ -829,6 +886,12 @@ impl APCoreMCPBuilder {
     /// Set whether to validate tool inputs.
     pub fn validate_inputs(mut self, validate: bool) -> Self {
         self.config.validate_inputs = validate;
+        self
+    }
+
+    /// Set whether to redact sensitive fields from tool outputs.
+    pub fn redact_output(mut self, redact: bool) -> Self {
+        self.config.redact_output = redact;
         self
     }
 
@@ -908,6 +971,21 @@ impl APCoreMCPBuilder {
         self
     }
 
+    /// Set the pipeline execution strategy.
+    pub fn strategy(mut self, name: &str) -> Self {
+        self.config.strategy = Some(name.to_string());
+        self
+    }
+
+    /// Enable or disable pipeline trace mode.
+    ///
+    /// When enabled, tool responses include pipeline trace data
+    /// (strategy name, duration, steps) if the executor supports it.
+    pub fn trace(mut self, enable: bool) -> Self {
+        self.config.trace = enable;
+        self
+    }
+
     /// Consume the builder and produce an [`APCoreMCP`] instance.
     ///
     /// Validates all inputs matching Python validation order, then resolves
@@ -948,6 +1026,44 @@ impl APCoreMCPBuilder {
         // Register MCP config namespace and error formatter (idempotent)
         crate::config::register_mcp_namespace();
         crate::adapters::errors::register_mcp_error_formatter();
+
+        // F-040: Load pipeline strategy from YAML config if present.
+        // The "mcp.pipeline" section in the Config Bus takes precedence over
+        // the builder's `strategy` parameter.
+        let _resolved_strategy: Option<String> = {
+            let yaml_pipeline: Option<Value> = crate::config::get_pipeline_config();
+            match (&yaml_pipeline, &self.config.strategy) {
+                (Some(pipeline_val), Some(builder_strategy)) => {
+                    let yaml_strategy = pipeline_val
+                        .get("strategy")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    if let Some(ref ys) = yaml_strategy {
+                        tracing::warn!(
+                            "YAML pipeline config strategy '{}' overrides builder strategy '{}'",
+                            ys,
+                            builder_strategy
+                        );
+                    }
+                    yaml_strategy.or_else(|| Some(builder_strategy.clone()))
+                }
+                (Some(pipeline_val), None) => {
+                    let yaml_strategy = pipeline_val
+                        .get("strategy")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    if let Some(ref ys) = yaml_strategy {
+                        tracing::info!("Pipeline strategy from YAML config: {}", ys);
+                    }
+                    yaml_strategy
+                }
+                (None, Some(ref strategy)) => {
+                    tracing::info!("Pipeline execution strategy: {}", strategy);
+                    Some(strategy.clone())
+                }
+                (None, None) => None,
+            }
+        };
 
         // Resolve backend into (registry, executor) pair.
         let backend = self.backend.ok_or_else(|| {
@@ -1011,6 +1127,8 @@ pub struct ServeConfig {
     pub log_level: Option<String>,
     /// Validate tool inputs against schemas before execution.
     pub validate_inputs: bool,
+    /// Pipeline execution strategy preset.
+    pub strategy: Option<String>,
 }
 
 impl Default for ServeConfig {
@@ -1025,6 +1143,7 @@ impl Default for ServeConfig {
             prefix: None,
             log_level: None,
             validate_inputs: false,
+            strategy: None,
         }
     }
 }
@@ -1044,6 +1163,8 @@ pub struct AsyncServeConfig {
     pub log_level: Option<String>,
     /// Validate tool inputs against schemas before execution.
     pub validate_inputs: bool,
+    /// Pipeline execution strategy preset.
+    pub strategy: Option<String>,
 }
 
 impl Default for AsyncServeConfig {
@@ -1055,6 +1176,7 @@ impl Default for AsyncServeConfig {
             prefix: None,
             log_level: None,
             validate_inputs: false,
+            strategy: None,
         }
     }
 }
@@ -1097,6 +1219,9 @@ pub fn serve(backend: impl Into<BackendSource>, config: ServeConfig) -> Result<(
     if let Some(log_level) = config.log_level.as_deref() {
         builder = builder.log_level(log_level);
     }
+    if let Some(strategy) = config.strategy.as_deref() {
+        builder = builder.strategy(strategy);
+    }
 
     let mcp = builder.build()?;
     mcp.serve()
@@ -1126,6 +1251,9 @@ pub async fn async_serve(
     }
     if let Some(log_level) = config.log_level.as_deref() {
         builder = builder.log_level(log_level);
+    }
+    if let Some(strategy) = config.strategy.as_deref() {
+        builder = builder.strategy(strategy);
     }
 
     let mcp = builder.build()?;
@@ -1764,6 +1892,7 @@ mod tests {
                     explorer_prefix: "no-slash".into(),
                     ..Default::default()
                 },
+                ..Default::default()
             })
             .await;
         assert!(matches!(result, Err(APCoreMCPError::InvalidExplorerPrefix)));

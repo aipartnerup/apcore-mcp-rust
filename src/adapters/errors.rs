@@ -188,6 +188,33 @@ impl ErrorMapper {
             return resp;
         }
 
+        // CONFIG_ENV_MAP_CONFLICT → include env_var from details
+        if error_type == "CONFIG_ENV_MAP_CONFLICT" {
+            let detail_val = error
+                .details
+                .get("env_var")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let message = format!(
+                "Configuration environment variable mapping conflict for '{}'",
+                detail_val
+            );
+            return build_detail_response(error, error_type, message);
+        }
+
+        // PIPELINE_ABORT → include step name from details
+        if error_type == "PIPELINE_ABORT" {
+            let detail_val = error
+                .details
+                .get("step")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let message = format!("Pipeline aborted at step '{}'", detail_val);
+            return build_detail_response(error, error_type, message);
+        }
+
+        // STEP_NOT_FOUND, VERSION_INCOMPATIBLE → handled by default passthrough below.
+
         // Default: pass through message and details
         let details_value = if error.details.is_empty() {
             None
@@ -256,6 +283,34 @@ fn format_validation_errors(details: &std::collections::HashMap<String, Value>) 
         .collect();
 
     format!("Schema validation failed:\n{}", lines.join("\n"))
+}
+
+/// Build an MCP error response with details passthrough and AI guidance.
+///
+/// Used by error-code-specific branches that extract a detail field into
+/// a custom message but otherwise follow the same structure.
+fn build_detail_response(
+    error: &ModuleError,
+    error_type: String,
+    message: String,
+) -> McpErrorResponse {
+    let details_value = if error.details.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_value(&error.details).unwrap_or(Value::Null))
+    };
+    let mut resp = McpErrorResponse {
+        is_error: true,
+        error_type,
+        message,
+        details: details_value,
+        retryable: None,
+        ai_guidance: None,
+        user_fixable: None,
+        suggestion: None,
+    };
+    attach_ai_guidance(error, &mut resp);
+    resp
 }
 
 /// Convert an apcore [`ApcoreErrorCode`] to its SCREAMING_SNAKE_CASE string.
@@ -509,6 +564,16 @@ mod tests {
         assert!(resp.details.is_none());
         assert_eq!(resp.retryable, Some(true));
     }
+
+    // ---- New error code handling (string-based matching) ----
+    //
+    // CONFIG_ENV_MAP_CONFLICT, PIPELINE_ABORT, STEP_NOT_FOUND, and
+    // VERSION_INCOMPATIBLE are handled via string matching on the
+    // serialized error code. Tests for CONFIG_ENV_MAP_CONFLICT and
+    // PIPELINE_ABORT require the apcore crate to expose those enum
+    // variants. STEP_NOT_FOUND and VERSION_INCOMPATIBLE fall through
+    // to the default passthrough and are implicitly covered by
+    // test_unknown_error_passthrough.
 
     // ---- Unknown / passthrough ----
 

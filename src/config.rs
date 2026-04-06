@@ -20,7 +20,23 @@ pub fn register_mcp_namespace() {
         env_prefix: Some(MCP_ENV_PREFIX.to_string()),
         defaults: Some(mcp_defaults()),
         schema: None,
+        env_style: apcore::config::EnvStyle::Auto,
+        max_depth: 4,
+        env_map: None,
     });
+}
+
+/// Attempt to read the `mcp.pipeline` configuration from the Config Bus.
+///
+/// Returns `Some(Value)` if a "pipeline" key exists in the MCP namespace
+/// configuration, `None` otherwise. This is used by F-040 (YAML Pipeline
+/// Config) to load pipeline strategy from configuration files.
+pub fn get_pipeline_config() -> Option<serde_json::Value> {
+    // Discover the config (from file or defaults), then read the MCP namespace.
+    // Called once during build(), so the file-system discovery cost is acceptable.
+    let config = Config::discover().ok()?;
+    let ns_value = config.namespace(MCP_NAMESPACE)?;
+    ns_value.get("pipeline").cloned().filter(|v| !v.is_null())
 }
 
 /// Returns the default configuration values for the MCP namespace.

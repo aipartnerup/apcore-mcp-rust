@@ -173,12 +173,7 @@ impl JWTAuthenticator {
             }
         }
 
-        Some(Identity {
-            id,
-            identity_type,
-            roles,
-            attrs,
-        })
+        Some(Identity::new(id, identity_type, roles, attrs))
     }
 }
 
@@ -351,9 +346,9 @@ mod tests {
             .authenticate(&headers)
             .await
             .expect("should authenticate");
-        assert_eq!(identity.id, "user-42");
-        assert_eq!(identity.identity_type, "human");
-        assert_eq!(identity.roles, vec!["admin", "reader"]);
+        assert_eq!(identity.id(), "user-42");
+        assert_eq!(identity.identity_type(), "human");
+        assert_eq!(identity.roles(), vec!["admin", "reader"]);
     }
 
     #[tokio::test]
@@ -426,7 +421,7 @@ mod tests {
         let token = make_token(&serde_json::json!({"sub": "user-1"}));
         let headers = headers_with_token(&token);
         let identity = auth.authenticate(&headers).await.unwrap();
-        assert_eq!(identity.identity_type, "user");
+        assert_eq!(identity.identity_type(), "user");
     }
 
     #[tokio::test]
@@ -435,7 +430,7 @@ mod tests {
         let token = make_token(&serde_json::json!({"sub": "user-1"}));
         let headers = headers_with_token(&token);
         let identity = auth.authenticate(&headers).await.unwrap();
-        assert!(identity.roles.is_empty());
+        assert!(identity.roles().is_empty());
     }
 
     #[tokio::test]
@@ -460,11 +455,11 @@ mod tests {
         let headers = headers_with_token(&token);
         let identity = auth.authenticate(&headers).await.unwrap();
         assert_eq!(
-            identity.attrs.get("email").and_then(|v| v.as_str()),
+            identity.attrs().get("email").and_then(|v| v.as_str()),
             Some("alice@example.com")
         );
         assert_eq!(
-            identity.attrs.get("org").and_then(|v| v.as_str()),
+            identity.attrs().get("org").and_then(|v| v.as_str()),
             Some("acme")
         );
     }
@@ -486,7 +481,7 @@ mod tests {
         let token = make_token(&serde_json::json!({"sub": "user-1"}));
         let headers = headers_with_token(&token);
         let identity = auth.authenticate(&headers).await.unwrap();
-        assert!(identity.attrs.is_empty());
+        assert!(identity.attrs().is_empty());
     }
 
     #[tokio::test]
@@ -622,8 +617,8 @@ mod tests {
         }));
         let headers = headers_with_token(&token);
         let identity = auth.authenticate(&headers).await.unwrap();
-        assert_eq!(identity.id, "u-99");
-        assert_eq!(identity.identity_type, "service");
-        assert_eq!(identity.roles, vec!["write"]);
+        assert_eq!(identity.id(), "u-99");
+        assert_eq!(identity.identity_type(), "service");
+        assert_eq!(identity.roles(), vec!["write"]);
     }
 }

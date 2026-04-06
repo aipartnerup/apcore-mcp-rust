@@ -141,6 +141,7 @@ mod tests {
         ApprovalRequest {
             module_id: "test.dangerous_tool".to_string(),
             arguments: json!({"path": "/etc/passwd"}),
+            context: None,
             annotations: Default::default(),
             description: Some("Delete a system file".to_string()),
             tags: vec!["destructive".to_string()],

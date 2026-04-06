@@ -168,6 +168,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         on_shutdown: Some(Box::new(|| {
             println!("MCP server shut down.");
         })),
+        dynamic: false,
     })?;
 
     Ok(())

@@ -101,6 +101,10 @@ impl AnnotationMapper {
             parts.push(format!("paginated={}", annotations.paginated));
         }
 
+        // NOTE: F-041 annotation metadata passthrough (`mcp_` prefixed keys from
+        // `annotations.extra`) will be added here once apcore exposes the `extra`
+        // field on ModuleAnnotations.
+
         if warnings.is_empty() && parts.is_empty() {
             return String::new();
         }

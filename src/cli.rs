@@ -20,6 +20,29 @@ pub enum Transport {
     Sse,
 }
 
+/// Pipeline execution strategy preset.
+#[derive(Clone, Debug, PartialEq, ValueEnum)]
+pub enum StrategyPreset {
+    Standard,
+    Internal,
+    Testing,
+    Performance,
+    Minimal,
+}
+
+impl StrategyPreset {
+    /// Return the lowercase string representation for the apcore executor.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StrategyPreset::Standard => "standard",
+            StrategyPreset::Internal => "internal",
+            StrategyPreset::Testing => "testing",
+            StrategyPreset::Performance => "performance",
+            StrategyPreset::Minimal => "minimal",
+        }
+    }
+}
+
 /// Approval handler mode.
 #[derive(Clone, Debug, PartialEq, ValueEnum)]
 pub enum ApprovalMode {
@@ -175,6 +198,10 @@ pub struct CliArgs {
     /// Approval handler mode.
     #[arg(long, value_enum, default_value_t = ApprovalMode::Off)]
     pub approval: ApprovalMode,
+
+    /// Pipeline execution strategy.
+    #[arg(long, value_enum, help = "Pipeline execution strategy")]
+    pub strategy: Option<StrategyPreset>,
 }
 
 // ── Error type ────────────────────────────────────────────────────────
@@ -388,6 +415,10 @@ pub async fn run() -> Result<(), CliError> {
         builder = builder.explorer_project_url(url);
     }
 
+    if let Some(ref strategy) = args.strategy {
+        builder = builder.strategy(strategy.as_str());
+    }
+
     let mcp = builder
         .build()
         .map_err(|e| CliError::StartupFailure(e.to_string()))?;
@@ -567,6 +598,7 @@ mod tests {
         assert!(args.jwt_require_auth);
         assert!(args.exempt_paths.is_none());
         assert_eq!(args.approval, ApprovalMode::Off);
+        assert!(args.strategy.is_none());
     }
 
     #[test]
@@ -954,6 +986,72 @@ mod tests {
         use jsonwebtoken::Algorithm;
         assert_eq!(parse_jwt_algorithm("hs256"), Algorithm::HS256);
         assert_eq!(parse_jwt_algorithm("rs256"), Algorithm::RS256);
+    }
+
+    // ── StrategyPreset enum tests ────────────────────────────────────
+
+    #[test]
+    fn strategy_from_str_standard() {
+        let val = StrategyPreset::from_str("standard", true).unwrap();
+        assert_eq!(val, StrategyPreset::Standard);
+    }
+
+    #[test]
+    fn strategy_from_str_internal() {
+        let val = StrategyPreset::from_str("internal", true).unwrap();
+        assert_eq!(val, StrategyPreset::Internal);
+    }
+
+    #[test]
+    fn strategy_from_str_testing() {
+        let val = StrategyPreset::from_str("testing", true).unwrap();
+        assert_eq!(val, StrategyPreset::Testing);
+    }
+
+    #[test]
+    fn strategy_from_str_performance() {
+        let val = StrategyPreset::from_str("performance", true).unwrap();
+        assert_eq!(val, StrategyPreset::Performance);
+    }
+
+    #[test]
+    fn strategy_from_str_minimal() {
+        let val = StrategyPreset::from_str("minimal", true).unwrap();
+        assert_eq!(val, StrategyPreset::Minimal);
+    }
+
+    #[test]
+    fn strategy_invalid_value() {
+        let result = StrategyPreset::from_str("unknown", true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn strategy_as_str_mappings() {
+        assert_eq!(StrategyPreset::Standard.as_str(), "standard");
+        assert_eq!(StrategyPreset::Internal.as_str(), "internal");
+        assert_eq!(StrategyPreset::Testing.as_str(), "testing");
+        assert_eq!(StrategyPreset::Performance.as_str(), "performance");
+        assert_eq!(StrategyPreset::Minimal.as_str(), "minimal");
+    }
+
+    #[test]
+    fn cli_args_strategy_flag() {
+        let args = parse_args(&[
+            "apcore-mcp",
+            "--extensions-dir",
+            "/tmp/ext",
+            "--strategy",
+            "testing",
+        ])
+        .unwrap();
+        assert_eq!(args.strategy, Some(StrategyPreset::Testing));
+    }
+
+    #[test]
+    fn cli_args_strategy_default_none() {
+        let args = parse_args(&["apcore-mcp", "--extensions-dir", "/tmp/ext"]).unwrap();
+        assert!(args.strategy.is_none());
     }
 
     #[test]

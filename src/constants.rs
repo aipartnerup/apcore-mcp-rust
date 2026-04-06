@@ -54,6 +54,9 @@ pub enum ErrorCode {
     ConfigMountError,
     ConfigBindError,
     ErrorFormatterDuplicate,
+    ConfigEnvMapConflict,
+    PipelineAbort,
+    StepNotFound,
 }
 
 /// Registry lifecycle events.
@@ -147,7 +150,9 @@ mod tests {
 
     #[test]
     fn error_code_count() {
-        assert_eq!(ErrorCode::iter().count(), 24);
+        // Intentional guard: update this count when adding new error codes
+        // to ensure the strum EnumIter derivation stays in sync.
+        assert_eq!(ErrorCode::iter().count(), 27);
     }
 
     #[test]
@@ -268,6 +273,9 @@ mod tests {
             "CONFIG_MOUNT_ERROR",
             "CONFIG_BIND_ERROR",
             "ERROR_FORMATTER_DUPLICATE",
+            "CONFIG_ENV_MAP_CONFLICT",
+            "PIPELINE_ABORT",
+            "STEP_NOT_FOUND",
         ];
         for code_str in &python_codes {
             let parsed: ErrorCode = code_str

@@ -96,6 +96,20 @@ pub trait Executor: Send + Sync {
     ) -> Option<ValidationResult> {
         None
     }
+
+    /// Execute a module and return the result along with a pipeline trace.
+    ///
+    /// Returns `None` if the executor does not support tracing. When
+    /// supported, returns `(result, trace)` where `trace` is a JSON
+    /// value containing `strategy_name`, `total_duration_ms`, and `steps`.
+    async fn call_with_trace(
+        &self,
+        _module_id: &str,
+        _inputs: &Value,
+        _context: Option<&Value>,
+    ) -> Option<Result<(Value, Value), ExecutorError>> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -218,10 +232,17 @@ pub struct ContentItem {
 pub struct ExecutionRouter {
     executor: Option<Box<dyn Executor>>,
     validate_inputs: bool,
+    redact_output: bool,
+    /// When true, use `call_with_trace` (if available) and include pipeline
+    /// trace data in the returned content.
+    trace: bool,
     output_formatter: Option<OutputFormatter>,
     /// Per-tool input schemas for `redact_sensitive` logging.
     /// Keys are tool names, values are their JSON Schema definitions.
     tool_schemas: HashMap<String, Value>,
+    /// Per-tool output schemas for `redact_sensitive` output redaction.
+    /// Keys are tool names, values are their output JSON Schema definitions.
+    output_schemas: HashMap<String, Value>,
 }
 
 impl ExecutionRouter {
@@ -234,8 +255,11 @@ impl ExecutionRouter {
         Self {
             executor: None,
             validate_inputs: false,
+            redact_output: true,
+            trace: false,
             output_formatter: None,
             tool_schemas: HashMap::new(),
+            output_schemas: HashMap::new(),
         }
     }
 
@@ -250,8 +274,11 @@ impl ExecutionRouter {
         Self {
             executor: None,
             validate_inputs,
+            redact_output: true,
+            trace: false,
             output_formatter,
             tool_schemas: HashMap::new(),
+            output_schemas: HashMap::new(),
         }
     }
 
@@ -269,8 +296,11 @@ impl ExecutionRouter {
         Self {
             executor: Some(executor),
             validate_inputs,
+            redact_output: true,
+            trace: false,
             output_formatter,
             tool_schemas: HashMap::new(),
+            output_schemas: HashMap::new(),
         }
     }
 
@@ -284,6 +314,37 @@ impl ExecutionRouter {
         self
     }
 
+    /// Set the output schemas used for `redact_sensitive` output redaction.
+    ///
+    /// Keys are tool names, values are their output JSON Schema definitions.
+    /// When set and `redact_output` is true, tool outputs are redacted before
+    /// formatting, replacing values marked with `x-sensitive: true`.
+    pub fn with_output_schemas(mut self, schemas: HashMap<String, Value>) -> Self {
+        self.output_schemas = schemas;
+        self
+    }
+
+    /// Set whether to redact sensitive fields from tool outputs.
+    ///
+    /// When `true` (the default) and an output schema is registered for a
+    /// tool, `apcore::redact_sensitive` is applied to the execution result
+    /// before formatting.
+    pub fn with_redact_output(mut self, redact: bool) -> Self {
+        self.redact_output = redact;
+        self
+    }
+
+    /// Set whether to include pipeline trace data in tool responses.
+    ///
+    /// When `true`, the router will attempt to use `call_with_trace` on the
+    /// executor. If the executor supports tracing, the response will include
+    /// an additional content item with the pipeline trace (strategy name,
+    /// duration, steps). Defaults to `false`.
+    pub fn with_trace(mut self, trace: bool) -> Self {
+        self.trace = trace;
+        self
+    }
+
     /// Redact sensitive fields from tool inputs for safe logging.
     ///
     /// If a schema is registered for `tool_name`, uses
@@ -294,6 +355,22 @@ impl ExecutionRouter {
         match self.tool_schemas.get(tool_name) {
             Some(schema) => apcore::redact_sensitive(inputs, schema),
             None => inputs.clone(),
+        }
+    }
+
+    /// Redact sensitive fields from tool output before formatting.
+    ///
+    /// If `redact_output` is enabled and an output schema is registered for
+    /// `tool_name`, uses `apcore::redact_sensitive` to replace `x-sensitive`
+    /// fields with `"***REDACTED***"`. Returns the original result unchanged
+    /// when no schema is available or redaction is disabled.
+    fn redact_output(&self, tool_name: &str, result: &Value) -> Value {
+        if !self.redact_output {
+            return result.clone();
+        }
+        match self.output_schemas.get(tool_name) {
+            Some(schema) => apcore::redact_sensitive(result, schema),
+            None => result.clone(),
         }
     }
 
@@ -314,6 +391,75 @@ impl ExecutionRouter {
             }
         }
         serde_json::to_string(result).unwrap_or_else(|_| "null".to_string())
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 6b: Preflight validation
+    // -----------------------------------------------------------------------
+
+    /// Validate a tool's arguments without executing the tool.
+    ///
+    /// Calls `executor.validate(tool_name, arguments)` if the executor
+    /// supports pre-execution validation. Returns a structured JSON object:
+    /// ```json
+    /// { "valid": bool, "checks": [...], "requires_approval": bool }
+    /// ```
+    ///
+    /// On unexpected errors, returns:
+    /// ```json
+    /// { "valid": false, "checks": [{"check": "unexpected", "message": "..."}] }
+    /// ```
+    pub async fn validate_tool(&self, tool_name: &str, arguments: &Value) -> Value {
+        let executor = match &self.executor {
+            Some(e) => e,
+            None => {
+                return serde_json::json!({
+                    "valid": false,
+                    "checks": [{"check": "unexpected", "message": "No executor configured"}],
+                    "requires_approval": false
+                });
+            }
+        };
+
+        // catch_unwind guards against panics from third-party executor
+        // implementations — validation should never take down the server.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            executor.validate(tool_name, arguments, None)
+        })) {
+            Ok(Some(validation)) => {
+                let checks: Vec<Value> = validation
+                    .errors
+                    .iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "check": e.field.as_deref().unwrap_or("general"),
+                            "message": e.message,
+                            "passed": false
+                        })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "valid": validation.valid,
+                    "checks": checks,
+                    "requires_approval": false
+                })
+            }
+            Ok(None) => {
+                // Executor does not support validation — report as valid.
+                serde_json::json!({
+                    "valid": true,
+                    "checks": [],
+                    "requires_approval": false
+                })
+            }
+            Err(_) => {
+                serde_json::json!({
+                    "valid": false,
+                    "checks": [{"check": "unexpected", "message": "validation panicked"}],
+                    "requires_approval": false
+                })
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -688,6 +834,9 @@ impl ExecutionRouter {
     }
 
     /// Non-streaming execution via executor.call_async().
+    ///
+    /// When `self.trace` is true and the executor supports `call_with_trace`,
+    /// the pipeline trace is included as an additional content item.
     async fn handle_call_async(
         &self,
         tool_name: &str,
@@ -708,9 +857,59 @@ impl ExecutionRouter {
             }
         };
 
+        // When trace mode is enabled, attempt call_with_trace first.
+        if self.trace {
+            if let Some(trace_result) = executor
+                .call_with_trace(tool_name, arguments, context)
+                .await
+            {
+                return match trace_result {
+                    Ok((result, trace)) => {
+                        let redacted_result = self.redact_output(tool_name, &result);
+                        let text = self.format_result(&redacted_result);
+                        let mut content = vec![ContentItem {
+                            content_type: "text".into(),
+                            data: Value::String(text),
+                        }];
+                        // Append the pipeline trace as a second content item.
+                        content.push(ContentItem {
+                            content_type: "text".into(),
+                            data: Value::String(format!(
+                                "[pipeline_trace] {}",
+                                serde_json::to_string(&trace).unwrap_or_else(|_| "{}".into())
+                            )),
+                        });
+                        let trace_id = context
+                            .and_then(|c| c.get("trace_id"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        (content, false, trace_id)
+                    }
+                    Err(error) => {
+                        tracing::error!("handle_call trace error for {tool_name}: {error}");
+                        let text = Self::build_error_text(&error);
+                        (
+                            vec![ContentItem {
+                                content_type: "text".into(),
+                                data: Value::String(text),
+                            }],
+                            true,
+                            None,
+                        )
+                    }
+                };
+            }
+            // Executor does not support call_with_trace; fall through to normal path.
+            tracing::debug!(
+                "Trace enabled but executor does not support call_with_trace for {tool_name}, \
+                 falling back to call_async"
+            );
+        }
+
         match executor.call_async(tool_name, arguments, context).await {
             Ok(result) => {
-                let text = self.format_result(&result);
+                let redacted_result = self.redact_output(tool_name, &result);
+                let text = self.format_result(&redacted_result);
                 let content = vec![ContentItem {
                     content_type: "text".into(),
                     data: Value::String(text),
@@ -818,7 +1017,8 @@ impl ExecutionRouter {
             }
         }
 
-        let text = self.format_result(&accumulated);
+        let redacted_accumulated = self.redact_output(tool_name, &accumulated);
+        let text = self.format_result(&redacted_accumulated);
         let content = vec![ContentItem {
             content_type: "text".into(),
             data: Value::String(text),
@@ -1147,8 +1347,11 @@ mod tests {
         let router = ExecutionRouter {
             executor: None,
             validate_inputs: false,
+            redact_output: false,
+            trace: false,
             output_formatter: Some(formatter),
             tool_schemas: HashMap::new(),
+            output_schemas: HashMap::new(),
         };
         let result = router.format_result(&json!({"a": 1, "b": 2}));
         assert_eq!(result, "custom: 2 keys");
@@ -1160,8 +1363,11 @@ mod tests {
         let router = ExecutionRouter {
             executor: None,
             validate_inputs: false,
+            redact_output: false,
+            trace: false,
             output_formatter: Some(formatter),
             tool_schemas: HashMap::new(),
+            output_schemas: HashMap::new(),
         };
         // Non-object values should fall back to JSON
         assert_eq!(router.format_result(&json!("string")), r#""string""#);
@@ -1175,8 +1381,11 @@ mod tests {
         let router = ExecutionRouter {
             executor: None,
             validate_inputs: false,
+            redact_output: false,
+            trace: false,
             output_formatter: Some(formatter),
             tool_schemas: HashMap::new(),
+            output_schemas: HashMap::new(),
         };
         // Should fall back to JSON when formatter returns an error
         let result = router.format_result(&json!({"key": "value"}));
@@ -1335,12 +1544,12 @@ mod tests {
 
     #[test]
     fn test_build_context_creates_apcore_context_with_typed_identity() {
-        let identity = apcore::Identity {
-            id: "user-42".to_string(),
-            identity_type: "human".to_string(),
-            roles: vec!["admin".to_string()],
-            attrs: Default::default(),
-        };
+        let identity = apcore::Identity::new(
+            "user-42".to_string(),
+            "human".to_string(),
+            vec!["admin".to_string()],
+            Default::default(),
+        );
         let extra = CallExtra {
             progress_token: None,
             send_notification: None,
@@ -1353,9 +1562,9 @@ mod tests {
             .identity
             .as_ref()
             .expect("identity should be set");
-        assert_eq!(ctx_id.id, "user-42");
-        assert_eq!(ctx_id.identity_type, "human");
-        assert_eq!(ctx_id.roles, vec!["admin"]);
+        assert_eq!(ctx_id.id(), "user-42");
+        assert_eq!(ctx_id.identity_type(), "human");
+        assert_eq!(ctx_id.roles(), vec!["admin"]);
     }
 
     #[test]
@@ -1377,18 +1586,18 @@ mod tests {
             .identity
             .as_ref()
             .expect("identity should be set");
-        assert_eq!(ctx_id.id, "svc-1");
-        assert_eq!(ctx_id.identity_type, "service");
+        assert_eq!(ctx_id.id(), "svc-1");
+        assert_eq!(ctx_id.identity_type(), "service");
     }
 
     #[test]
     fn test_build_context_typed_identity_takes_precedence() {
-        let typed = apcore::Identity {
-            id: "typed-user".to_string(),
-            identity_type: "human".to_string(),
-            roles: vec![],
-            attrs: Default::default(),
-        };
+        let typed = apcore::Identity::new(
+            "typed-user".to_string(),
+            "human".to_string(),
+            vec![],
+            Default::default(),
+        );
         let json_identity = json!({
             "id": "json-user",
             "type": "service",
@@ -1404,7 +1613,8 @@ mod tests {
         let (_, _, apcore_ctx) = ExecutionRouter::build_context(&extra);
         let ctx_id = apcore_ctx.identity.as_ref().unwrap();
         assert_eq!(
-            ctx_id.id, "typed-user",
+            ctx_id.id(),
+            "typed-user",
             "typed_identity should take precedence"
         );
     }

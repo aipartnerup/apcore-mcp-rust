@@ -38,26 +38,26 @@ mod tests {
 
     #[test]
     fn identity_has_expected_fields() {
-        let identity = Identity {
-            id: "user-123".to_string(),
-            identity_type: "human".to_string(),
-            roles: vec!["admin".to_string()],
-            attrs: Default::default(),
-        };
-        assert_eq!(identity.id, "user-123");
-        assert_eq!(identity.identity_type, "human");
-        assert_eq!(identity.roles, vec!["admin"]);
-        assert!(identity.attrs.is_empty());
+        let identity = Identity::new(
+            "user-123".to_string(),
+            "human".to_string(),
+            vec!["admin".to_string()],
+            Default::default(),
+        );
+        assert_eq!(identity.id(), "user-123");
+        assert_eq!(identity.identity_type(), "human");
+        assert_eq!(identity.roles(), vec!["admin"]);
+        assert!(identity.attrs().is_empty());
     }
 
     #[test]
     fn identity_debug_and_clone() {
-        let identity = Identity {
-            id: "agent-1".to_string(),
-            identity_type: "service".to_string(),
-            roles: vec![],
-            attrs: Default::default(),
-        };
+        let identity = Identity::new(
+            "agent-1".to_string(),
+            "service".to_string(),
+            vec![],
+            Default::default(),
+        );
         let cloned = identity.clone();
         assert_eq!(format!("{:?}", identity), format!("{:?}", cloned));
     }

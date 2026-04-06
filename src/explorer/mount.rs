@@ -172,10 +172,10 @@ impl mcp_embedded_ui::Authenticator for AuthBridge {
     ) -> Option<mcp_embedded_ui::Identity> {
         let id = self.inner.authenticate(headers).await?;
         Some(mcp_embedded_ui::Identity {
-            id: id.id,
-            identity_type: id.identity_type,
-            roles: id.roles,
-            attrs: id.attrs,
+            id: id.id().to_string(),
+            identity_type: id.identity_type().to_string(),
+            roles: id.roles().to_vec(),
+            attrs: id.attrs().clone(),
         })
     }
 }
@@ -203,11 +203,13 @@ fn wrap_call_fn(inner: HandleCallFn) -> mcp_embedded_ui::ToolCallFn {
                     .try_with(|id| id.clone())
                     .ok()
                     .flatten()
-                    .map(|ui_id| apcore::Identity {
-                        id: ui_id.id,
-                        identity_type: ui_id.identity_type,
-                        roles: ui_id.roles,
-                        attrs: ui_id.attrs,
+                    .map(|ui_id| {
+                        apcore::Identity::new(
+                            ui_id.id,
+                            ui_id.identity_type,
+                            ui_id.roles,
+                            ui_id.attrs,
+                        )
                     });
 
             // Run the call handler within apcore's AUTH_IDENTITY scope.
@@ -561,12 +563,12 @@ mod tests {
             async fn authenticate(&self, headers: &HashMap<String, String>) -> Option<Identity> {
                 let auth = headers.get("authorization")?;
                 if auth.starts_with("Bearer ") {
-                    Some(Identity {
-                        id: "authed-user".to_string(),
-                        identity_type: "human".to_string(),
-                        roles: vec!["user".to_string()],
-                        attrs: Default::default(),
-                    })
+                    Some(Identity::new(
+                        "authed-user".to_string(),
+                        "human".to_string(),
+                        vec!["user".to_string()],
+                        Default::default(),
+                    ))
                 } else {
                     None
                 }
@@ -579,7 +581,7 @@ mod tests {
                 let identity_id = AUTH_IDENTITY
                     .try_with(|id| {
                         id.as_ref()
-                            .map(|i| i.id.clone())
+                            .map(|i| i.id().to_string())
                             .unwrap_or_else(|| "none".to_string())
                     })
                     .unwrap_or_else(|_| "no-task-local".to_string());

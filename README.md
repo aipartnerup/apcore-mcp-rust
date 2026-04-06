@@ -50,7 +50,7 @@ cargo add apcore-mcp
 cargo install apcore-mcp
 ```
 
-Requires Rust 1.75+ and `apcore >= 0.15.1`.
+Requires Rust 1.75+ and `apcore >= 0.17.1`.
 
 ## Quick Start
 

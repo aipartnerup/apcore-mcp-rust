@@ -218,12 +218,12 @@ mod tests {
             let auth = headers.get("authorization")?;
             let token = auth.strip_prefix("Bearer ")?;
             if token == self.valid_token {
-                Some(Identity {
-                    id: "test-user".to_string(),
-                    identity_type: "human".to_string(),
-                    roles: vec!["user".to_string()],
-                    attrs: Default::default(),
-                })
+                Some(Identity::new(
+                    "test-user".to_string(),
+                    "human".to_string(),
+                    vec!["user".to_string()],
+                    Default::default(),
+                ))
             } else {
                 None
             }
@@ -245,7 +245,7 @@ mod tests {
         let identity_id = AUTH_IDENTITY
             .try_with(|id| {
                 id.as_ref()
-                    .map(|i| i.id.clone())
+                    .map(|i| i.id().to_string())
                     .unwrap_or_else(|| "anonymous".to_string())
             })
             .unwrap_or_else(|_| "no-task-local".to_string());

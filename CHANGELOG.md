@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-04-06
+
+### Added
+
+- **Pipeline Strategy Selection** (F-036) — `--strategy` CLI flag and builder `.strategy()` with 5 presets (standard, internal, testing, performance, minimal).
+- **Tool Output Redaction** (F-038) — `redact_output` config (default: true) applies `redact_sensitive()` before serialization.
+- **Pipeline Observability** (F-037) — `.trace(true)` enables `call_with_trace()` for per-step timing.
+- **Tool Preflight Validation** (F-039) — `ExecutionRouter::validate_tool()` for dry-run validation.
+- **YAML Pipeline Configuration** (F-040) — Config Bus `mcp.pipeline` section via `build_strategy_from_config()`.
+- **Annotation Metadata Passthrough** (F-041) — `mcp_` prefixed keys from annotations extra (behind feature flag).
+- **4 new error mappings** — `CONFIG_ENV_MAP_CONFLICT`, `PIPELINE_ABORT`, `STEP_NOT_FOUND`, `VERSION_INCOMPATIBLE`.
+- **RegistryListener wired to `dynamic` serve option**.
+
+### Changed
+
+- **Dependency bump**: `apcore = "0.17"` (was `"0.15"`).
+
+---
+
 ## [0.12.0] - 2026-03-31
 
 ### Added
