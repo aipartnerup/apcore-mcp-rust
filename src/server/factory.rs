@@ -20,6 +20,37 @@ use crate::server::types::{
     ServerCapabilities, TextContent, Tool, ToolAnnotations, ToolsCapability,
 };
 
+/// Summarize a full apcore `PipelineTrace` JSON into the MCP `_meta.trace`
+/// shape: `{ step_count, steps: [{ name, duration_ms, skip_reason? }] }`.
+fn summarize_trace(trace: &Value) -> Value {
+    let steps = trace.get("steps").and_then(|v| v.as_array());
+    let step_summaries: Vec<Value> = steps
+        .map(|arr| {
+            arr.iter()
+                .map(|step| {
+                    let mut obj = serde_json::Map::new();
+                    if let Some(n) = step.get("name").and_then(|v| v.as_str()) {
+                        obj.insert("name".into(), Value::String(n.to_string()));
+                    }
+                    if let Some(d) = step.get("duration_ms") {
+                        obj.insert("duration_ms".into(), d.clone());
+                    }
+                    if let Some(r) = step.get("skip_reason").cloned() {
+                        if !r.is_null() {
+                            obj.insert("skip_reason".into(), r);
+                        }
+                    }
+                    Value::Object(obj)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    serde_json::json!({
+        "step_count": step_summaries.len(),
+        "steps": step_summaries,
+    })
+}
+
 /// AI intent metadata keys extracted from module metadata and appended
 /// to tool descriptions for agent visibility.
 const AI_INTENT_KEYS: &[&str] = &[
@@ -263,7 +294,7 @@ impl MCPServerFactory {
         let mut tools = Vec::new();
 
         for module_id in module_ids {
-            let descriptor = match registry.get_definition(module_id) {
+            let descriptor = match registry.get_definition(&module_id) {
                 Some(d) => d,
                 None => {
                     tracing::warn!("Skipped module {}: no definition found", module_id);
@@ -271,11 +302,11 @@ impl MCPServerFactory {
                 }
             };
 
-            let base_description = registry.describe(module_id);
+            let base_description = registry.describe(&module_id);
 
             // Resolve display overlay from metadata["display"]["mcp"]
             let mcp_display = module_metadata
-                .and_then(|meta| meta.get(module_id))
+                .and_then(|meta| meta.get(&module_id))
                 .and_then(|v| v.get("display"))
                 .and_then(|v| v.get("mcp"));
 
@@ -299,7 +330,7 @@ impl MCPServerFactory {
                 None => description,
             };
 
-            match self.build_tool(descriptor, &description, None, name_override) {
+            match self.build_tool(&descriptor, &description, None, name_override) {
                 Ok(tool) => tools.push(tool),
                 Err(e) => {
                     tracing::warn!("Failed to build tool for {}: {}", module_id, e);
@@ -343,15 +374,27 @@ impl MCPServerFactory {
                 let (content_items, is_error, _trace_id) =
                     router.handle_call(&name, &arguments, extra_ref).await;
 
-                let content: Vec<TextContent> = content_items
-                    .into_iter()
-                    .filter(|item| item.content_type == "text")
-                    .map(|item| {
-                        TextContent::new(item.data.as_str().unwrap_or_default().to_string())
-                    })
-                    .collect();
+                // Extract any pipeline trace item for `_meta.trace`.
+                let mut meta_trace: Option<Value> = None;
+                let mut text_items: Vec<TextContent> = Vec::new();
+                for item in content_items {
+                    match item.content_type.as_str() {
+                        "text" => text_items.push(TextContent::new(
+                            item.data.as_str().unwrap_or_default().to_string(),
+                        )),
+                        "trace" => {
+                            meta_trace = Some(summarize_trace(&item.data));
+                        }
+                        _ => {}
+                    }
+                }
 
-                CallToolResult { content, is_error }
+                let meta = meta_trace.map(|t| serde_json::json!({ "trace": t }));
+                CallToolResult {
+                    content: text_items,
+                    is_error,
+                    meta,
+                }
             })
         }));
     }
@@ -372,7 +415,7 @@ impl MCPServerFactory {
         // Build docs map: module_id -> description (as documentation)
         let mut docs_map: HashMap<String, String> = HashMap::new();
         for module_id in registry.list(None, None) {
-            let description = registry.describe(module_id);
+            let description = registry.describe(&module_id);
             if description != "Module not found" && !description.is_empty() {
                 docs_map.insert(module_id.to_string(), description);
             }
@@ -517,7 +560,7 @@ mod tests {
 
     /// Helper to create a registry with mock modules.
     fn make_registry_with_modules(modules: Vec<(&str, &str, Vec<String>)>) -> Registry {
-        let mut registry = Registry::new();
+        let registry = Registry::new();
         for (name, desc, tags) in modules {
             let module = Box::new(MockModule::new(desc));
             let descriptor = ModuleDescriptor {

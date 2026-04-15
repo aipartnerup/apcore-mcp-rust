@@ -953,12 +953,7 @@ mod tests {
         assert!(!server.has_tool_handlers());
 
         server.call_tool_handler = Some(Arc::new(|_name, _args, _extra| {
-            Box::pin(async {
-                CallToolResult {
-                    content: vec![],
-                    is_error: false,
-                }
-            })
+            Box::pin(async { CallToolResult::new(vec![], false) })
         }));
         assert!(server.has_tool_handlers());
     }
@@ -1006,12 +1001,7 @@ mod tests {
     async fn call_tool_invokes_handler() {
         let mut server = MCPServer::new(MCPServerConfig::default());
         server.call_tool_handler = Some(Arc::new(|_name, _args, _extra| {
-            Box::pin(async move {
-                CallToolResult {
-                    content: vec![],
-                    is_error: false,
-                }
-            })
+            Box::pin(async move { CallToolResult::new(vec![], false) })
         }));
         let fut = server.call_tool("my-tool".into(), Value::Null, None);
         assert!(fut.is_some());
@@ -1153,12 +1143,12 @@ mod tests {
                     .get("text")
                     .and_then(|v| v.as_str())
                     .unwrap_or("no text");
-                CallToolResult {
-                    content: vec![TextContent::new(format!(
+                CallToolResult::new(
+                    vec![TextContent::new(format!(
                         "{{\"name\":\"{name}\",\"text\":\"{text}\"}}"
                     ))],
-                    is_error: false,
-                }
+                    false,
+                )
             }) as Pin<Box<dyn std::future::Future<Output = CallToolResult> + Send>>
         });
         ServerHandler {

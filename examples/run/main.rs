@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     // 1. Create a registry and register example modules.
-    let mut registry = Registry::new();
+    let registry = Registry::new();
 
     registry.register(
         "text.echo",

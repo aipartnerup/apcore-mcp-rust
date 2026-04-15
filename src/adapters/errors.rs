@@ -17,7 +17,7 @@ const INTERNAL_ERROR_CODES: &[ApcoreErrorCode] = &[
 ];
 
 /// Error codes that require detail sanitization (hide sensitive info).
-const SANITIZED_ERROR_CODES: &[ApcoreErrorCode] = &[ApcoreErrorCode::AclDenied];
+const SANITIZED_ERROR_CODES: &[ApcoreErrorCode] = &[ApcoreErrorCode::ACLDenied];
 
 /// Structured MCP error response.
 ///
@@ -412,7 +412,7 @@ mod tests {
             Value::String("secret-caller".to_string()),
         );
         let err = make_error_with_details(
-            ApcoreErrorCode::AclDenied,
+            ApcoreErrorCode::ACLDenied,
             "caller X denied access to Y",
             details,
         );

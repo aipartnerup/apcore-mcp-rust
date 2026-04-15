@@ -68,11 +68,14 @@ pub struct ValidationResult {
 #[async_trait]
 pub trait Executor: Send + Sync {
     /// Execute a module by ID and return the result.
+    ///
+    /// `version_hint` optionally pins a module version for dispatch.
     async fn call_async(
         &self,
         module_id: &str,
         inputs: &Value,
         context: Option<&Value>,
+        version_hint: Option<&str>,
     ) -> Result<Value, ExecutorError>;
 
     /// Return a stream of result chunks for a module, or `None` if
@@ -107,6 +110,7 @@ pub trait Executor: Send + Sync {
         _module_id: &str,
         _inputs: &Value,
         _context: Option<&Value>,
+        _version_hint: Option<&str>,
     ) -> Option<Result<(Value, Value), ExecutorError>> {
         None
     }
@@ -527,6 +531,14 @@ impl ExecutionRouter {
         // Extract streaming helpers and identity from extra
         let (progress_token, send_notification, session, identity) = Self::extract_extra(extra);
 
+        // Extract optional version_hint from `_meta.apcore.version` in the
+        // MCP call metadata.
+        let version_hint: Option<String> = extra
+            .and_then(|v| v.get("apcore"))
+            .and_then(|v| v.get("version"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
         // Build per-call context
         let call_extra = CallExtra {
             progress_token,
@@ -568,8 +580,13 @@ impl ExecutionRouter {
             self.handle_stream(tool_name, arguments, pt, sn, Some(&context_value))
                 .await
         } else {
-            self.handle_call_async(tool_name, arguments, Some(&context_value))
-                .await
+            self.handle_call_async_with_hint(
+                tool_name,
+                arguments,
+                Some(&context_value),
+                version_hint.as_deref(),
+            )
+            .await
         }
     }
 
@@ -770,7 +787,7 @@ impl ExecutionRouter {
         // side-channel `data` map since serde_json::Value cannot hold
         // function pointers.
         {
-            let mut shared = apcore_ctx.data.write().unwrap_or_else(|e| e.into_inner());
+            let mut shared = apcore_ctx.data.write();
             if has_progress {
                 shared.insert(MCP_PROGRESS_KEY.to_string(), serde_json::json!("available"));
             }
@@ -843,6 +860,17 @@ impl ExecutionRouter {
         arguments: &Value,
         context: Option<&Value>,
     ) -> (Vec<ContentItem>, bool, Option<String>) {
+        self.handle_call_async_with_hint(tool_name, arguments, context, None)
+            .await
+    }
+
+    async fn handle_call_async_with_hint(
+        &self,
+        tool_name: &str,
+        arguments: &Value,
+        context: Option<&Value>,
+        version_hint: Option<&str>,
+    ) -> (Vec<ContentItem>, bool, Option<String>) {
         let executor = match &self.executor {
             Some(e) => e,
             None => {
@@ -860,7 +888,7 @@ impl ExecutionRouter {
         // When trace mode is enabled, attempt call_with_trace first.
         if self.trace {
             if let Some(trace_result) = executor
-                .call_with_trace(tool_name, arguments, context)
+                .call_with_trace(tool_name, arguments, context, version_hint)
                 .await
             {
                 return match trace_result {
@@ -871,13 +899,12 @@ impl ExecutionRouter {
                             content_type: "text".into(),
                             data: Value::String(text),
                         }];
-                        // Append the pipeline trace as a second content item.
+                        // Attach compact trace as side-channel content for
+                        // routers/tests that want it inline. The factory
+                        // maps it into `_meta.trace` via `last_trace()`.
                         content.push(ContentItem {
-                            content_type: "text".into(),
-                            data: Value::String(format!(
-                                "[pipeline_trace] {}",
-                                serde_json::to_string(&trace).unwrap_or_else(|_| "{}".into())
-                            )),
+                            content_type: "trace".into(),
+                            data: trace.clone(),
                         });
                         let trace_id = context
                             .and_then(|c| c.get("trace_id"))
@@ -906,7 +933,10 @@ impl ExecutionRouter {
             );
         }
 
-        match executor.call_async(tool_name, arguments, context).await {
+        match executor
+            .call_async(tool_name, arguments, context, version_hint)
+            .await
+        {
             Ok(result) => {
                 let redacted_result = self.redact_output(tool_name, &result);
                 let text = self.format_result(&redacted_result);
@@ -938,6 +968,10 @@ impl ExecutionRouter {
     // -----------------------------------------------------------------------
     // Task 6: Streaming path
     // -----------------------------------------------------------------------
+
+    // TODO(apcore>=0.19): streaming traces (stream_with_trace) not exposed
+    // by apcore 0.18; when available, capture step traces during streaming
+    // and attach them to `_meta.trace` like the non-streaming path.
 
     /// Streaming execution via executor.stream().
     ///
@@ -1053,6 +1087,7 @@ mod tests {
             module_id: &str,
             inputs: &Value,
             _context: Option<&Value>,
+            _version_hint: Option<&str>,
         ) -> Result<Value, ExecutorError> {
             Ok(json!({ "module": module_id, "echo": inputs }))
         }
@@ -1068,6 +1103,7 @@ mod tests {
             _module_id: &str,
             inputs: &Value,
             _context: Option<&Value>,
+            _version_hint: Option<&str>,
         ) -> Result<Value, ExecutorError> {
             Ok(inputs.clone())
         }
@@ -1111,7 +1147,7 @@ mod tests {
     async fn test_mock_executor_call_async() {
         let executor = MockExecutor;
         let result = executor
-            .call_async("test.module", &json!({"key": "value"}), None)
+            .call_async("test.module", &json!({"key": "value"}), None, None)
             .await
             .unwrap();
         assert_eq!(result["module"], "test.module");
@@ -1630,7 +1666,7 @@ mod tests {
             typed_identity: None,
         };
         let (_, _, apcore_ctx) = ExecutionRouter::build_context(&extra);
-        let data = apcore_ctx.data.read().unwrap();
+        let data = apcore_ctx.data.read();
         assert_eq!(data.get(MCP_PROGRESS_KEY), Some(&json!("available")));
         assert!(!data.contains_key(MCP_ELICIT_KEY));
     }
@@ -1651,7 +1687,7 @@ mod tests {
             typed_identity: None,
         };
         let (_, _, apcore_ctx) = ExecutionRouter::build_context(&extra);
-        let data = apcore_ctx.data.read().unwrap();
+        let data = apcore_ctx.data.read();
         assert_eq!(data.get(MCP_ELICIT_KEY), Some(&json!("available")));
         assert!(!data.contains_key(MCP_PROGRESS_KEY));
     }
@@ -1666,7 +1702,7 @@ mod tests {
             typed_identity: None,
         };
         let (_, _, apcore_ctx) = ExecutionRouter::build_context(&extra);
-        let data = apcore_ctx.data.read().unwrap();
+        let data = apcore_ctx.data.read();
         assert!(data.is_empty());
     }
 
@@ -1874,6 +1910,7 @@ mod tests {
             _module_id: &str,
             _inputs: &Value,
             _context: Option<&Value>,
+            _version_hint: Option<&str>,
         ) -> Result<Value, ExecutorError> {
             // Clone the error fields manually since ExecutorError doesn't impl Clone
             match &self.error {
@@ -2058,6 +2095,7 @@ mod tests {
             _module_id: &str,
             _inputs: &Value,
             _context: Option<&Value>,
+            _version_hint: Option<&str>,
         ) -> Result<Value, ExecutorError> {
             Ok(json!({"fallback": true}))
         }
@@ -2100,6 +2138,7 @@ mod tests {
             _module_id: &str,
             _inputs: &Value,
             _context: Option<&Value>,
+            _version_hint: Option<&str>,
         ) -> Result<Value, ExecutorError> {
             Ok(json!({"non_streaming": true}))
         }
@@ -2656,6 +2695,7 @@ mod tests {
             _module_id: &str,
             _inputs: &Value,
             context: Option<&Value>,
+            _version_hint: Option<&str>,
         ) -> Result<Value, ExecutorError> {
             // Return the context so test can inspect it
             Ok(context.cloned().unwrap_or(Value::Null))
@@ -2750,6 +2790,7 @@ mod tests {
             module_id: &str,
             inputs: &Value,
             _context: Option<&Value>,
+            _version_hint: Option<&str>,
         ) -> Result<Value, ExecutorError> {
             self.calls
                 .lock()
@@ -3114,5 +3155,92 @@ mod tests {
         };
         let (_, data, _) = ExecutionRouter::build_context(&extra);
         assert!(data.contains_key(MCP_ELICIT_KEY));
+    }
+
+    // ==================================================================
+    // Task 3: trace capture via call_with_trace
+    // Task 4: version_hint passthrough
+    // ==================================================================
+
+    struct TracingExecutor;
+
+    #[async_trait]
+    impl Executor for TracingExecutor {
+        async fn call_async(
+            &self,
+            _module_id: &str,
+            inputs: &Value,
+            _context: Option<&Value>,
+            _version_hint: Option<&str>,
+        ) -> Result<Value, ExecutorError> {
+            Ok(inputs.clone())
+        }
+
+        async fn call_with_trace(
+            &self,
+            module_id: &str,
+            _inputs: &Value,
+            _context: Option<&Value>,
+            _version_hint: Option<&str>,
+        ) -> Option<Result<(Value, Value), ExecutorError>> {
+            let trace = json!({
+                "module_id": module_id,
+                "strategy_name": "standard",
+                "total_duration_ms": 1.5,
+                "steps": [
+                    {"name": "acl", "duration_ms": 0.1, "skipped": false},
+                    {"name": "execute", "duration_ms": 1.0, "skipped": false},
+                ],
+            });
+            Some(Ok((json!({"ok": true}), trace)))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_trace_enabled_emits_trace_content_item() {
+        let router = ExecutionRouter::new(Box::new(TracingExecutor), false, None).with_trace(true);
+        let (content, is_error, _) = router.handle_call("mod", &json!({}), None).await;
+        assert!(!is_error);
+        let trace_item = content
+            .iter()
+            .find(|c| c.content_type == "trace")
+            .expect("trace content item expected");
+        let steps = trace_item
+            .data
+            .get("steps")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert_eq!(steps.len(), 2);
+    }
+
+    struct VersionHintCapturingExecutor {
+        captured: Arc<std::sync::Mutex<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl Executor for VersionHintCapturingExecutor {
+        async fn call_async(
+            &self,
+            _module_id: &str,
+            _inputs: &Value,
+            _context: Option<&Value>,
+            version_hint: Option<&str>,
+        ) -> Result<Value, ExecutorError> {
+            *self.captured.lock().unwrap() = version_hint.map(|s| s.to_string());
+            Ok(json!({"ok": true}))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_version_hint_flows_through() {
+        let captured: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+        let exec = VersionHintCapturingExecutor {
+            captured: Arc::clone(&captured),
+        };
+        let router = ExecutionRouter::new(Box::new(exec), false, None);
+        let meta = json!({ "apcore": { "version": "2.0.1" } });
+        let (_content, is_error, _) = router.handle_call("mod", &json!({}), Some(&meta)).await;
+        assert!(!is_error);
+        assert_eq!(captured.lock().unwrap().clone(), Some("2.0.1".to_string()));
     }
 }

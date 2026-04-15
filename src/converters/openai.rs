@@ -143,7 +143,9 @@ impl OpenAIConverter {
             .get("input_schema")
             .cloned()
             .unwrap_or(Value::Null);
-        let mut parameters = SchemaConverter::convert_input_schema(&input_schema)?;
+        // OpenAI converter keeps legacy (non-strict) behavior; callers can
+        // opt-in separately. MCP tool schemas in factory.rs use strict mode.
+        let mut parameters = SchemaConverter::convert_input_schema_strict(&input_schema, false)?;
 
         // Build description with optional annotation suffix
         let mut desc = description.to_string();

@@ -229,15 +229,43 @@ impl crate::server::router::Executor for ApcoreExecutorAdapter {
         module_id: &str,
         inputs: &Value,
         _context: Option<&Value>,
+        version_hint: Option<&str>,
     ) -> Result<Value, ExecutorError> {
         self.inner
-            .call_async(module_id, inputs.clone(), None, None)
+            .call(module_id, inputs.clone(), None, version_hint)
             .await
             .map_err(|e| ExecutorError::Execution {
                 code: format!("{:?}", e.code),
                 message: e.to_string(),
                 details: None,
             })
+    }
+
+    async fn call_with_trace(
+        &self,
+        module_id: &str,
+        inputs: &Value,
+        _context: Option<&Value>,
+        _version_hint: Option<&str>,
+    ) -> Option<Result<(Value, Value), ExecutorError>> {
+        // Delegates to apcore::Executor::call_with_trace. `version_hint` is
+        // accepted for API parity; apcore 0.18's call_with_trace does not yet
+        // accept it directly — TODO(apcore>=0.19): forward version_hint.
+        let result = self
+            .inner
+            .call_with_trace(module_id, inputs.clone(), None, None)
+            .await;
+        Some(match result {
+            Ok((out, trace)) => {
+                let trace_json = serde_json::to_value(&trace).unwrap_or(Value::Null);
+                Ok((out, trace_json))
+            }
+            Err(e) => Err(ExecutorError::Execution {
+                code: format!("{:?}", e.code),
+                message: e.to_string(),
+                details: None,
+            }),
+        })
     }
 }
 
@@ -377,7 +405,7 @@ impl APCoreMCP {
             let module_ids = self.reg().list(tags_slice, prefix);
             let mut map = std::collections::HashMap::new();
             for module_id in module_ids {
-                if let Some(descriptor) = self.reg().get_definition(module_id) {
+                if let Some(descriptor) = self.reg().get_definition(&module_id) {
                     if !descriptor.output_schema.is_null() {
                         map.insert(module_id.to_string(), descriptor.output_schema.clone());
                     }
@@ -719,8 +747,8 @@ impl APCoreMCP {
         let mut map = serde_json::Map::new();
 
         for module_id in module_ids {
-            if let Some(descriptor) = self.reg().get_definition(module_id) {
-                let description = self.reg().describe(module_id);
+            if let Some(descriptor) = self.reg().get_definition(&module_id) {
+                let description = self.reg().describe(&module_id);
                 let annotations_json =
                     serde_json::to_value(&descriptor.annotations).unwrap_or(Value::Null);
                 let tags_json: Vec<Value> = descriptor
@@ -1331,7 +1359,7 @@ mod tests {
 
     /// Create a test registry with the given modules.
     fn make_test_registry(modules: Vec<(&str, &str, Vec<String>)>) -> Registry {
-        let mut registry = Registry::new();
+        let registry = Registry::new();
         for (name, desc, tags) in modules {
             let module = Box::new(MockModule::new(desc));
             let descriptor = ModuleDescriptor {
@@ -1718,6 +1746,21 @@ mod tests {
         let mcp = make_test_apcore_mcp();
         let _exec = mcp.executor();
         // Just verify it returns without panic
+    }
+
+    // Task 2: default strategy is "standard" for MCP (external-facing).
+    #[test]
+    fn default_executor_uses_standard_strategy() {
+        let mcp = make_test_apcore_mcp();
+        let info = mcp.executor().describe_pipeline();
+        assert_eq!(info.name, "standard");
+        // Standard strategy has several steps including ACL + validate + execute.
+        assert!(info.step_count >= 3, "got {} steps", info.step_count);
+        assert!(
+            info.step_names.iter().any(|s| s == "execute"),
+            "steps: {:?}",
+            info.step_names
+        );
     }
 
     #[test]

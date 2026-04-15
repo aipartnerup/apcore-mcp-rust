@@ -71,6 +71,19 @@ impl TextContent {
 pub struct CallToolResult {
     pub content: Vec<TextContent>,
     pub is_error: bool,
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+}
+
+impl CallToolResult {
+    /// Create a minimal result from content + error flag (no `_meta`).
+    pub fn new(content: Vec<TextContent>, is_error: bool) -> Self {
+        Self {
+            content,
+            is_error,
+            meta: None,
+        }
+    }
 }
 
 /// An MCP Resource definition exposed via `list_resources`.
@@ -223,6 +236,7 @@ mod tests {
         let result = CallToolResult {
             content: vec![TextContent::new("result text")],
             is_error: false,
+            meta: None,
         };
 
         let serialized = serde_json::to_value(&result).unwrap();

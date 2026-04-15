@@ -21,22 +21,47 @@ impl SchemaConverter {
     /// Convert an apcore input schema to an MCP tool input schema.
     ///
     /// MCP requires `type: "object"` at the top level with explicit `properties`.
+    /// Defaults to strict mode (injects `additionalProperties: false` on every
+    /// object node lacking an explicit setting).
     pub fn convert_input_schema(schema: &Value) -> Result<Value, AdapterError> {
-        Self::convert_schema(schema)
+        Self::convert_schema_with(schema, true)
     }
 
     /// Convert an apcore output schema to an MCP-compatible output description.
+    /// Defaults to strict mode.
     pub fn convert_output_schema(schema: &Value) -> Result<Value, AdapterError> {
-        Self::convert_schema(schema)
+        Self::convert_schema_with(schema, true)
     }
 
-    fn convert_schema(schema: &Value) -> Result<Value, AdapterError> {
+    /// Convert an input schema with explicit strictness control.
+    pub fn convert_input_schema_strict(
+        schema: &Value,
+        strict: bool,
+    ) -> Result<Value, AdapterError> {
+        Self::convert_schema_with(schema, strict)
+    }
+
+    /// Convert an output schema with explicit strictness control.
+    pub fn convert_output_schema_strict(
+        schema: &Value,
+        strict: bool,
+    ) -> Result<Value, AdapterError> {
+        Self::convert_schema_with(schema, strict)
+    }
+
+    fn convert_schema_with(schema: &Value, strict: bool) -> Result<Value, AdapterError> {
         // Clone to avoid mutating input
         let mut schema = schema.clone();
 
         // Handle null or empty object
         if schema.is_null() || schema.as_object().is_some_and(|m| m.is_empty()) {
-            return Ok(json!({"type": "object", "properties": {}}));
+            let mut base = json!({"type": "object", "properties": {}});
+            if strict {
+                base.as_object_mut()
+                    .unwrap()
+                    .insert("additionalProperties".to_string(), json!(false));
+            }
+            return Ok(base);
         }
 
         // Inline $refs if $defs present
@@ -50,7 +75,35 @@ impl SchemaConverter {
         // Ensure root type: object
         Self::ensure_object_type(&mut schema);
 
+        if strict {
+            Self::inject_strict(&mut schema);
+        }
+
         Ok(schema)
+    }
+
+    /// Recursively inject `additionalProperties: false` on every object node
+    /// that doesn't already have an explicit `additionalProperties` setting.
+    /// Preserves user-set `additionalProperties: true` (or any other value).
+    fn inject_strict(node: &mut Value) {
+        match node {
+            Value::Object(map) => {
+                let is_object_type = map.get("type").and_then(|v| v.as_str()) == Some("object")
+                    || map.contains_key("properties");
+                if is_object_type && !map.contains_key("additionalProperties") {
+                    map.insert("additionalProperties".to_string(), json!(false));
+                }
+                for (_, v) in map.iter_mut() {
+                    Self::inject_strict(v);
+                }
+            }
+            Value::Array(arr) => {
+                for v in arr.iter_mut() {
+                    Self::inject_strict(v);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn inline_refs(
@@ -149,13 +202,13 @@ mod tests {
     #[test]
     fn test_empty_schema() {
         let schema = json!({});
-        let result = SchemaConverter::convert_input_schema(&schema).unwrap();
+        let result = SchemaConverter::convert_input_schema_strict(&schema, false).unwrap();
         assert_eq!(result, json!({"type": "object", "properties": {}}));
     }
 
     #[test]
     fn test_null_schema() {
-        let result = SchemaConverter::convert_input_schema(&Value::Null).unwrap();
+        let result = SchemaConverter::convert_input_schema_strict(&Value::Null, false).unwrap();
         assert_eq!(result, json!({"type": "object", "properties": {}}));
     }
 
@@ -167,7 +220,7 @@ mod tests {
                 "name": {"type": "string"}
             }
         });
-        let result = SchemaConverter::convert_input_schema(&schema).unwrap();
+        let result = SchemaConverter::convert_input_schema_strict(&schema, false).unwrap();
         assert_eq!(result, schema);
     }
 
@@ -477,6 +530,57 @@ mod tests {
             "string"
         );
         assert!(result.get("$defs").is_none());
+    }
+
+    #[test]
+    fn test_strict_root_additional_properties_false() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"x": {"type": "string"}}
+        });
+        let result = SchemaConverter::convert_input_schema(&schema).unwrap();
+        assert_eq!(result["additionalProperties"], json!(false));
+    }
+
+    #[test]
+    fn test_strict_nested_additional_properties_false() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "inner": {
+                    "type": "object",
+                    "properties": {"y": {"type": "integer"}}
+                }
+            }
+        });
+        let result = SchemaConverter::convert_input_schema(&schema).unwrap();
+        assert_eq!(result["additionalProperties"], json!(false));
+        assert_eq!(
+            result["properties"]["inner"]["additionalProperties"],
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn test_strict_preserves_user_additional_properties_true() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "open": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": true
+                }
+            }
+        });
+        let result = SchemaConverter::convert_input_schema(&schema).unwrap();
+        // Root gets strict
+        assert_eq!(result["additionalProperties"], json!(false));
+        // User-set true preserved
+        assert_eq!(
+            result["properties"]["open"]["additionalProperties"],
+            json!(true)
+        );
     }
 
     #[test]
