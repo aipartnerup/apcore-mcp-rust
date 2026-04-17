@@ -5,6 +5,7 @@
 //! This crate provides the bridge layer that translates apcore module
 //! registries and executors into MCP-compatible tool servers.
 
+pub mod acl_builder;
 pub mod adapters;
 pub mod apcore_mcp;
 pub mod auth;
@@ -14,6 +15,7 @@ pub mod constants;
 pub mod converters;
 pub mod explorer;
 pub mod helpers;
+pub mod middleware_builder;
 pub mod server;
 mod utils;
 

@@ -207,7 +207,7 @@ impl MCPServerFactory {
     ///
     /// Mapping:
     /// - `name_override` (if provided) or `descriptor.name` -> `Tool.name`
-    /// - `description` + AI intent metadata -> `Tool.description`
+    /// - `description` + AI intent metadata from `descriptor.metadata` -> `Tool.description`
     /// - `SchemaConverter::convert_input_schema` -> `Tool.inputSchema`
     /// - `AnnotationMapper::to_mcp_annotations` -> `Tool.annotations`
     /// - `requires_approval` / `streaming` flags -> `Tool._meta`
@@ -215,14 +215,13 @@ impl MCPServerFactory {
         &self,
         descriptor: &ModuleDescriptor,
         description: &str,
-        metadata: Option<&HashMap<String, String>>,
         name_override: Option<&str>,
     ) -> Result<Tool, Box<dyn std::error::Error>> {
         // Convert input schema
         let input_schema = SchemaConverter::convert_input_schema(&descriptor.input_schema)?;
 
         // Map annotations
-        let mcp_ann = AnnotationMapper::to_mcp_annotations(Some(&descriptor.annotations));
+        let mcp_ann = AnnotationMapper::to_mcp_annotations(descriptor.annotations.as_ref());
         let annotations = Some(ToolAnnotations {
             title: mcp_ann.title,
             read_only_hint: Some(mcp_ann.read_only_hint),
@@ -232,20 +231,32 @@ impl MCPServerFactory {
         });
 
         // Build _meta
-        let meta_value = ToolAnnotationBuilder::build_meta_value(Some(&descriptor.annotations));
+        let meta_value = ToolAnnotationBuilder::build_meta_value(descriptor.annotations.as_ref());
         let meta = if meta_value.as_object().is_none_or(|m| m.is_empty()) {
             None
         } else {
             Some(meta_value)
         };
 
-        // Enrich description with AI intent metadata
-        let enriched_description = enrich_description(description, metadata);
+        // Extract AI intent metadata from descriptor.metadata as string map
+        let intent_metadata: HashMap<String, String> = descriptor
+            .metadata
+            .iter()
+            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+            .collect();
+        let intent_ref = if intent_metadata.is_empty() {
+            None
+        } else {
+            Some(&intent_metadata)
+        };
 
-        // Use name_override if provided, otherwise fall back to descriptor.name
+        // Enrich description with AI intent metadata
+        let enriched_description = enrich_description(description, intent_ref);
+
+        // Use name_override if provided, otherwise fall back to module_id
         let tool_name = match name_override {
             Some(name) => name.to_string(),
-            None => descriptor.name.clone(),
+            None => descriptor.module_id.clone(),
         };
 
         Ok(Tool {
@@ -265,9 +276,7 @@ impl MCPServerFactory {
     /// a tool for each module that has a definition. Modules without
     /// definitions or that fail `build_tool()` are logged and skipped.
     ///
-    /// If `module_metadata` is provided, it maps module IDs to their metadata
-    /// (as JSON). For each module, the display overlay at
-    /// `metadata["display"]["mcp"]` is checked for:
+    /// Display overlays are resolved from `descriptor.metadata["display"]["mcp"]`:
     /// - `alias`: overrides the tool name
     /// - `description`: overrides the descriptor description
     /// - `guidance`: appended as "\n\nGuidance: {text}" to the description
@@ -276,19 +285,6 @@ impl MCPServerFactory {
         registry: &Registry,
         tags: Option<&[&str]>,
         prefix: Option<&str>,
-    ) -> Vec<Tool> {
-        self.build_tools_with_metadata(registry, tags, prefix, None)
-    }
-
-    /// Build MCP tool definitions with optional per-module metadata for display overlays.
-    ///
-    /// See [`build_tools`] for details on the display overlay resolution.
-    pub fn build_tools_with_metadata(
-        &self,
-        registry: &Registry,
-        tags: Option<&[&str]>,
-        prefix: Option<&str>,
-        module_metadata: Option<&HashMap<String, Value>>,
     ) -> Vec<Tool> {
         let module_ids = registry.list(tags, prefix);
         let mut tools = Vec::new();
@@ -304,10 +300,10 @@ impl MCPServerFactory {
 
             let base_description = registry.describe(&module_id);
 
-            // Resolve display overlay from metadata["display"]["mcp"]
-            let mcp_display = module_metadata
-                .and_then(|meta| meta.get(&module_id))
-                .and_then(|v| v.get("display"))
+            // Resolve display overlay from descriptor.metadata["display"]["mcp"]
+            let mcp_display = descriptor
+                .metadata
+                .get("display")
                 .and_then(|v| v.get("mcp"));
 
             let name_override = mcp_display
@@ -330,7 +326,7 @@ impl MCPServerFactory {
                 None => description,
             };
 
-            match self.build_tool(&descriptor, &description, None, name_override) {
+            match self.build_tool(&descriptor, &description, name_override) {
                 Ok(tool) => tools.push(tool),
                 Err(e) => {
                     tracing::warn!("Failed to build tool for {}: {}", module_id, e);
@@ -497,26 +493,40 @@ mod tests {
     /// Helper to create a minimal ModuleDescriptor for testing.
     fn make_descriptor(name: &str, annotations: ModuleAnnotations) -> ModuleDescriptor {
         ModuleDescriptor {
-            name: name.to_string(),
-            annotations,
+            module_id: name.to_string(),
+            name: None,
+            description: String::new(),
+            documentation: None,
             input_schema: json!({"type": "object", "properties": {"query": {"type": "string"}}}),
             output_schema: json!({}),
-            enabled: true,
+            version: "1.0.0".to_string(),
             tags: vec![],
+            annotations: Some(annotations),
+            examples: vec![],
+            metadata: HashMap::new(),
+            sunset_date: None,
             dependencies: vec![],
+            enabled: true,
         }
     }
 
     #[allow(dead_code)]
     fn make_descriptor_with_tags(name: &str, tags: Vec<String>) -> ModuleDescriptor {
         ModuleDescriptor {
-            name: name.to_string(),
-            annotations: ModuleAnnotations::default(),
+            module_id: name.to_string(),
+            name: None,
+            description: String::new(),
+            documentation: None,
             input_schema: json!({"type": "object", "properties": {"q": {"type": "string"}}}),
             output_schema: json!({}),
-            enabled: true,
+            version: "1.0.0".to_string(),
             tags,
+            annotations: Some(ModuleAnnotations::default()),
+            examples: vec![],
+            metadata: HashMap::new(),
+            sunset_date: None,
             dependencies: vec![],
+            enabled: true,
         }
     }
 
@@ -560,17 +570,35 @@ mod tests {
 
     /// Helper to create a registry with mock modules.
     fn make_registry_with_modules(modules: Vec<(&str, &str, Vec<String>)>) -> Registry {
+        make_registry_with_modules_and_metadata(
+            modules
+                .into_iter()
+                .map(|(n, d, t)| (n, d, t, HashMap::new()))
+                .collect(),
+        )
+    }
+
+    fn make_registry_with_modules_and_metadata(
+        modules: Vec<(&str, &str, Vec<String>, HashMap<String, serde_json::Value>)>,
+    ) -> Registry {
         let registry = Registry::new();
-        for (name, desc, tags) in modules {
+        for (name, desc, tags, metadata) in modules {
             let module = Box::new(MockModule::new(desc));
             let descriptor = ModuleDescriptor {
-                name: name.to_string(),
-                annotations: ModuleAnnotations::default(),
+                module_id: name.to_string(),
+                name: None,
+                description: desc.to_string(),
+                documentation: None,
                 input_schema: json!({"type": "object", "properties": {"q": {"type": "string"}}}),
                 output_schema: json!({}),
-                enabled: true,
+                version: "1.0.0".to_string(),
                 tags,
+                annotations: Some(ModuleAnnotations::default()),
+                examples: vec![],
+                metadata,
+                sunset_date: None,
                 dependencies: vec![],
+                enabled: true,
             };
             registry
                 .register_internal(name, module, descriptor)
@@ -585,7 +613,7 @@ mod tests {
     fn test_build_tool_name_is_module_name() {
         let factory = make_factory();
         let desc = make_descriptor("my.module.id", ModuleAnnotations::default());
-        let tool = factory.build_tool(&desc, "A tool", None, None).unwrap();
+        let tool = factory.build_tool(&desc, "A tool", None).unwrap();
         assert_eq!(tool.name, "my.module.id");
     }
 
@@ -594,7 +622,7 @@ mod tests {
         let factory = make_factory();
         let desc = make_descriptor("mod.test", ModuleAnnotations::default());
         let tool = factory
-            .build_tool(&desc, "Reads files from disk", None, None)
+            .build_tool(&desc, "Reads files from disk", None)
             .unwrap();
         assert_eq!(tool.description, "Reads files from disk");
     }
@@ -603,7 +631,7 @@ mod tests {
     fn test_build_tool_input_schema() {
         let factory = make_factory();
         let desc = make_descriptor("mod.test", ModuleAnnotations::default());
-        let tool = factory.build_tool(&desc, "desc", None, None).unwrap();
+        let tool = factory.build_tool(&desc, "desc", None).unwrap();
         assert_eq!(tool.input_schema["type"], "object");
         assert_eq!(tool.input_schema["properties"]["query"]["type"], "string");
     }
@@ -617,7 +645,7 @@ mod tests {
             ..Default::default()
         };
         let desc = make_descriptor("mod.test", ann);
-        let tool = factory.build_tool(&desc, "desc", None, None).unwrap();
+        let tool = factory.build_tool(&desc, "desc", None).unwrap();
         let annotations = tool.annotations.unwrap();
         assert_eq!(annotations.read_only_hint, Some(true));
         assert_eq!(annotations.destructive_hint, Some(true));
@@ -631,7 +659,7 @@ mod tests {
             ..Default::default()
         };
         let desc = make_descriptor("mod.test", ann);
-        let tool = factory.build_tool(&desc, "desc", None, None).unwrap();
+        let tool = factory.build_tool(&desc, "desc", None).unwrap();
         let meta = tool.meta.unwrap();
         assert_eq!(meta["requiresApproval"], true);
         assert!(meta.get("streaming").is_none());
@@ -645,7 +673,7 @@ mod tests {
             ..Default::default()
         };
         let desc = make_descriptor("mod.test", ann);
-        let tool = factory.build_tool(&desc, "desc", None, None).unwrap();
+        let tool = factory.build_tool(&desc, "desc", None).unwrap();
         let meta = tool.meta.unwrap();
         assert_eq!(meta["streaming"], true);
         assert!(meta.get("requiresApproval").is_none());
@@ -660,7 +688,7 @@ mod tests {
             ..Default::default()
         };
         let desc = make_descriptor("mod.test", ann);
-        let tool = factory.build_tool(&desc, "desc", None, None).unwrap();
+        let tool = factory.build_tool(&desc, "desc", None).unwrap();
         let meta = tool.meta.unwrap();
         assert_eq!(meta["requiresApproval"], true);
         assert_eq!(meta["streaming"], true);
@@ -670,7 +698,7 @@ mod tests {
     fn test_build_tool_meta_none() {
         let factory = make_factory();
         let desc = make_descriptor("mod.test", ModuleAnnotations::default());
-        let tool = factory.build_tool(&desc, "desc", None, None).unwrap();
+        let tool = factory.build_tool(&desc, "desc", None).unwrap();
         assert!(
             tool.meta.is_none(),
             "default annotations should produce no _meta"
@@ -752,19 +780,14 @@ mod tests {
     #[test]
     fn test_build_tool_with_ai_intent_metadata() {
         let factory = make_factory();
-        let desc = make_descriptor("files.read", ModuleAnnotations::default());
-        let mut metadata = HashMap::new();
-        metadata.insert(
-            "x-when-to-use".to_string(),
-            "Use for reading files".to_string(),
-        );
-        metadata.insert(
+        let mut desc = make_descriptor("files.read", ModuleAnnotations::default());
+        desc.metadata
+            .insert("x-when-to-use".to_string(), json!("Use for reading files"));
+        desc.metadata.insert(
             "x-common-mistakes".to_string(),
-            "Forgetting the path".to_string(),
+            json!("Forgetting the path"),
         );
-        let tool = factory
-            .build_tool(&desc, "Read files", Some(&metadata), None)
-            .unwrap();
+        let tool = factory.build_tool(&desc, "Read files", None).unwrap();
         assert!(tool.description.starts_with("Read files\n\n"));
         assert!(tool
             .description
@@ -1273,21 +1296,19 @@ mod tests {
     #[test]
     fn test_display_overlay_alias_used_as_tool_name() {
         let factory = make_factory();
-        let registry = make_registry_with_modules(vec![("mod.original", "Original desc", vec![])]);
-
-        let mut metadata = HashMap::new();
-        metadata.insert(
-            "mod.original".to_string(),
-            json!({
-                "display": {
-                    "mcp": {
-                        "alias": "my-custom-alias"
-                    }
-                }
-            }),
+        let mut meta = HashMap::new();
+        meta.insert(
+            "display".to_string(),
+            json!({"mcp": {"alias": "my-custom-alias"}}),
         );
+        let registry = make_registry_with_modules_and_metadata(vec![(
+            "mod.original",
+            "Original desc",
+            vec![],
+            meta,
+        )]);
 
-        let tools = factory.build_tools_with_metadata(&registry, None, None, Some(&metadata));
+        let tools = factory.build_tools(&registry, None, None);
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "my-custom-alias");
     }
@@ -1295,21 +1316,19 @@ mod tests {
     #[test]
     fn test_display_overlay_description_used() {
         let factory = make_factory();
-        let registry = make_registry_with_modules(vec![("mod.a", "Default description", vec![])]);
-
-        let mut metadata = HashMap::new();
-        metadata.insert(
-            "mod.a".to_string(),
-            json!({
-                "display": {
-                    "mcp": {
-                        "description": "Overridden description"
-                    }
-                }
-            }),
+        let mut meta = HashMap::new();
+        meta.insert(
+            "display".to_string(),
+            json!({"mcp": {"description": "Overridden description"}}),
         );
+        let registry = make_registry_with_modules_and_metadata(vec![(
+            "mod.a",
+            "Default description",
+            vec![],
+            meta,
+        )]);
 
-        let tools = factory.build_tools_with_metadata(&registry, None, None, Some(&metadata));
+        let tools = factory.build_tools(&registry, None, None);
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].description, "Overridden description");
     }
@@ -1317,21 +1336,19 @@ mod tests {
     #[test]
     fn test_display_overlay_guidance_appended() {
         let factory = make_factory();
-        let registry = make_registry_with_modules(vec![("mod.a", "Base description", vec![])]);
-
-        let mut metadata = HashMap::new();
-        metadata.insert(
-            "mod.a".to_string(),
-            json!({
-                "display": {
-                    "mcp": {
-                        "guidance": "Use this tool when you need to process data"
-                    }
-                }
-            }),
+        let mut meta = HashMap::new();
+        meta.insert(
+            "display".to_string(),
+            json!({"mcp": {"guidance": "Use this tool when you need to process data"}}),
         );
+        let registry = make_registry_with_modules_and_metadata(vec![(
+            "mod.a",
+            "Base description",
+            vec![],
+            meta,
+        )]);
 
-        let tools = factory.build_tools_with_metadata(&registry, None, None, Some(&metadata));
+        let tools = factory.build_tools(&registry, None, None);
         assert_eq!(tools.len(), 1);
         assert_eq!(
             tools[0].description,
@@ -1344,15 +1361,7 @@ mod tests {
         let factory = make_factory();
         let registry = make_registry_with_modules(vec![("mod.a", "Default description", vec![])]);
 
-        // No metadata provided at all
-        let tools = factory.build_tools_with_metadata(&registry, None, None, None);
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, "mod.a");
-        assert_eq!(tools[0].description, "Default description");
-
-        // Empty metadata map
-        let empty_metadata: HashMap<String, Value> = HashMap::new();
-        let tools = factory.build_tools_with_metadata(&registry, None, None, Some(&empty_metadata));
+        let tools = factory.build_tools(&registry, None, None);
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "mod.a");
         assert_eq!(tools[0].description, "Default description");
@@ -1363,7 +1372,7 @@ mod tests {
         let factory = make_factory();
         let desc = make_descriptor("mod.original", ModuleAnnotations::default());
         let tool = factory
-            .build_tool(&desc, "desc", None, Some("custom-name"))
+            .build_tool(&desc, "desc", Some("custom-name"))
             .unwrap();
         assert_eq!(tool.name, "custom-name");
     }
@@ -1372,30 +1381,32 @@ mod tests {
     fn test_build_tool_name_override_none_uses_descriptor() {
         let factory = make_factory();
         let desc = make_descriptor("mod.original", ModuleAnnotations::default());
-        let tool = factory.build_tool(&desc, "desc", None, None).unwrap();
+        let tool = factory.build_tool(&desc, "desc", None).unwrap();
         assert_eq!(tool.name, "mod.original");
     }
 
     #[test]
     fn test_display_overlay_all_fields_combined() {
         let factory = make_factory();
-        let registry = make_registry_with_modules(vec![("mod.a", "Default description", vec![])]);
-
-        let mut metadata = HashMap::new();
-        metadata.insert(
-            "mod.a".to_string(),
+        let mut meta = HashMap::new();
+        meta.insert(
+            "display".to_string(),
             json!({
-                "display": {
-                    "mcp": {
-                        "alias": "custom-tool",
-                        "description": "Custom description",
-                        "guidance": "Important usage notes"
-                    }
+                "mcp": {
+                    "alias": "custom-tool",
+                    "description": "Custom description",
+                    "guidance": "Important usage notes"
                 }
             }),
         );
+        let registry = make_registry_with_modules_and_metadata(vec![(
+            "mod.a",
+            "Default description",
+            vec![],
+            meta,
+        )]);
 
-        let tools = factory.build_tools_with_metadata(&registry, None, None, Some(&metadata));
+        let tools = factory.build_tools(&registry, None, None);
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "custom-tool");
         assert_eq!(

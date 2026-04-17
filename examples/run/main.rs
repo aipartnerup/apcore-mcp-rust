@@ -47,18 +47,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "text.echo",
         Box::new(modules::TextEcho),
         ModuleDescriptor {
-            name: "text.echo".into(),
-            annotations: ModuleAnnotations {
+            module_id: "text.echo".into(),
+            name: None,
+            description: "Echo text back".into(),
+            documentation: None,
+            input_schema: modules::TextEcho.input_schema(),
+            output_schema: modules::TextEcho.output_schema(),
+            version: "1.0.0".into(),
+            tags: vec!["text".into(), "utility".into()],
+            annotations: Some(ModuleAnnotations {
                 readonly: true,
                 idempotent: true,
                 open_world: false,
                 ..Default::default()
-            },
-            input_schema: modules::TextEcho.input_schema(),
-            output_schema: modules::TextEcho.output_schema(),
-            tags: vec!["text".into(), "utility".into()],
-            enabled: true,
+            }),
+            examples: vec![],
+            metadata: std::collections::HashMap::new(),
+            sunset_date: None,
             dependencies: vec![],
+            enabled: true,
         },
     )?;
 
@@ -66,18 +73,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "math.calc",
         Box::new(modules::MathCalc),
         ModuleDescriptor {
-            name: "math.calc".into(),
-            annotations: ModuleAnnotations {
+            module_id: "math.calc".into(),
+            name: None,
+            description: "Calculate math expressions".into(),
+            documentation: None,
+            input_schema: modules::MathCalc.input_schema(),
+            output_schema: modules::MathCalc.output_schema(),
+            version: "1.0.0".into(),
+            tags: vec!["math".into(), "utility".into()],
+            annotations: Some(ModuleAnnotations {
                 readonly: true,
                 idempotent: true,
                 open_world: false,
                 ..Default::default()
-            },
-            input_schema: modules::MathCalc.input_schema(),
-            output_schema: modules::MathCalc.output_schema(),
-            tags: vec!["math".into(), "utility".into()],
-            enabled: true,
+            }),
+            examples: vec![],
+            metadata: std::collections::HashMap::new(),
+            sunset_date: None,
             dependencies: vec![],
+            enabled: true,
         },
     )?;
 
@@ -85,17 +99,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "greeting",
         Box::new(modules::Greeting),
         ModuleDescriptor {
-            name: "greeting".into(),
-            annotations: ModuleAnnotations {
+            module_id: "greeting".into(),
+            name: None,
+            description: "Generate a greeting".into(),
+            documentation: None,
+            input_schema: modules::Greeting.input_schema(),
+            output_schema: modules::Greeting.output_schema(),
+            version: "1.0.0".into(),
+            tags: vec!["text".into(), "fun".into()],
+            annotations: Some(ModuleAnnotations {
                 readonly: true,
                 open_world: false,
                 ..Default::default()
-            },
-            input_schema: modules::Greeting.input_schema(),
-            output_schema: modules::Greeting.output_schema(),
-            tags: vec!["text".into(), "fun".into()],
-            enabled: true,
+            }),
+            examples: vec![],
+            metadata: std::collections::HashMap::new(),
+            sunset_date: None,
             dependencies: vec![],
+            enabled: true,
         },
     )?;
 

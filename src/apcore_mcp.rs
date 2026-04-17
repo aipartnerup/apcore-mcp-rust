@@ -117,6 +117,10 @@ pub enum APCoreMCPError {
     #[error("backend resolution failed: {0}")]
     BackendResolution(String),
 
+    /// Invalid configuration value (e.g. malformed Config Bus entry).
+    #[error("config error: {0}")]
+    Config(String),
+
     /// Unknown transport type.
     #[error("Unknown transport: {0:?}. Expected 'stdio', 'streamable-http', or 'sse'.")]
     UnknownTransport(String),
@@ -392,12 +396,6 @@ impl APCoreMCP {
             .map(|t| t.iter().map(|s| s.as_str()).collect());
         let tags_slice: Option<&[&str]> = tags_refs.as_deref();
         let prefix = self.config.prefix.as_deref();
-        // TODO: Use build_tools_with_metadata() once apcore Rust crate adds
-        // `metadata: Option<HashMap<String, Value>>` to ModuleDescriptor.
-        // Currently ModuleDescriptor has no metadata field, so display overlay
-        // (alias, description, guidance from metadata.display.mcp) cannot be
-        // resolved at runtime. The Python and TypeScript SDKs support this
-        // because their apcore SDKs include descriptor.metadata.
         let tools = factory.build_tools(self.reg(), tags_slice, prefix);
 
         // Build output schema map for output redaction.
@@ -854,6 +852,14 @@ pub struct APCoreMCPBuilder {
     metrics_collector: Option<Arc<dyn MetricsExporter>>,
     output_formatter: Option<OutputFormatter>,
     approval_handler: Option<Arc<dyn ApprovalHandler>>,
+    /// apcore `Middleware` instances to install via `executor.use_middleware()`
+    /// after the backend Executor is resolved. Appended to any middleware
+    /// declared under Config Bus key `mcp.middleware`.
+    middleware: Vec<Box<dyn apcore::Middleware>>,
+    /// Optional apcore `ACL` to install via `executor.set_acl()` after the
+    /// backend Executor is resolved. When `None`, Config Bus `mcp.acl` is
+    /// consulted instead. Caller-supplied ACL takes precedence over Config Bus.
+    acl: Option<apcore::ACL>,
 }
 
 impl APCoreMCPBuilder {
@@ -954,6 +960,37 @@ impl APCoreMCPBuilder {
     /// **Note:** Reserved — not yet wired into the executor pipeline.
     pub fn approval_handler(mut self, handler: Arc<dyn ApprovalHandler>) -> Self {
         self.approval_handler = Some(handler);
+        self
+    }
+
+    /// Install a middleware instance on the Executor via `use_middleware()`.
+    ///
+    /// Call multiple times to stack middleware. Middleware loaded from Config
+    /// Bus `mcp.middleware` is applied first, then builder-supplied middleware
+    /// in call order. Chain execution order inside the pipeline is controlled
+    /// by `Middleware.priority`, not registration order.
+    pub fn middleware(mut self, mw: Box<dyn apcore::Middleware>) -> Self {
+        self.middleware.push(mw);
+        self
+    }
+
+    /// Install a batch of middleware instances in order.
+    pub fn middleware_batch(
+        mut self,
+        mws: impl IntoIterator<Item = Box<dyn apcore::Middleware>>,
+    ) -> Self {
+        self.middleware.extend(mws);
+        self
+    }
+
+    /// Install an ACL on the Executor during `build()`.
+    ///
+    /// Overrides any ACL declared under Config Bus key `mcp.acl`. Applied
+    /// after the backend Executor is resolved via `executor.set_acl()`,
+    /// which uses interior mutability (apcore >= 0.18.2), so it works with
+    /// a shared `Arc<Executor>`.
+    pub fn acl(mut self, acl: apcore::ACL) -> Self {
+        self.acl = Some(acl);
         self
     }
 
@@ -1119,6 +1156,33 @@ impl APCoreMCPBuilder {
             }
             BackendSource::Executor(exec) => (None, exec),
         };
+
+        // ── Install middleware (Config Bus entries first, then builder) ──
+        let config_value = crate::config::get_middleware_config();
+        let config_middleware =
+            crate::middleware_builder::build_middleware_from_config(config_value.as_ref())?;
+        for mw in config_middleware {
+            executor.use_middleware(mw).map_err(|e| {
+                APCoreMCPError::Config(format!("failed to install Config Bus middleware: {e}"))
+            })?;
+        }
+        for mw in self.middleware {
+            executor.use_middleware(mw).map_err(|e| {
+                APCoreMCPError::Config(format!("failed to install middleware: {e}"))
+            })?;
+        }
+
+        // ── Install ACL (caller-supplied wins; else Config Bus) ───────────
+        let effective_acl = match self.acl {
+            Some(a) => Some(a),
+            None => {
+                let cfg_value = crate::config::get_acl_config();
+                crate::acl_builder::build_acl_from_config(cfg_value.as_ref())?
+            }
+        };
+        if let Some(acl) = effective_acl {
+            executor.set_acl(acl);
+        }
 
         Ok(APCoreMCP {
             config: self.config,
@@ -1363,13 +1427,20 @@ mod tests {
         for (name, desc, tags) in modules {
             let module = Box::new(MockModule::new(desc));
             let descriptor = ModuleDescriptor {
-                name: name.to_string(),
-                annotations: ModuleAnnotations::default(),
+                module_id: name.to_string(),
+                name: None,
+                description: desc.to_string(),
+                documentation: None,
                 input_schema: json!({"type": "object", "properties": {"q": {"type": "string"}}}),
                 output_schema: json!({}),
-                enabled: true,
+                version: "1.0.0".to_string(),
                 tags,
+                annotations: Some(ModuleAnnotations::default()),
+                examples: vec![],
+                metadata: std::collections::HashMap::new(),
+                sunset_date: None,
                 dependencies: vec![],
+                enabled: true,
             };
             registry
                 .register_internal(name, module, descriptor)
@@ -1729,6 +1800,89 @@ mod tests {
         // Executor backend: stored registry is a placeholder (empty),
         // tool discovery uses executor.registry() via reg().
         assert!(result.is_ok());
+    }
+
+    // -- Middleware support tests (Phase 1.1) ----------------------------------
+
+    #[test]
+    fn builder_middleware_setter_installs_on_executor() {
+        use apcore::RetryMiddleware;
+        let reg = Registry::new();
+        let exec = Arc::new(Executor::new(reg, Config::default()));
+        APCoreMCP::builder()
+            .backend(BackendSource::Executor(exec.clone()))
+            .middleware(Box::new(RetryMiddleware::new(Default::default())))
+            .build()
+            .expect("build should succeed");
+        let names = exec.middlewares();
+        assert!(
+            names.iter().any(|n| n == "retry"),
+            "expected 'retry' in executor middlewares, got {names:?}"
+        );
+    }
+
+    #[test]
+    fn builder_middleware_batch_installs_all_in_order() {
+        use apcore::{LoggingMiddleware, RetryMiddleware};
+        let reg = Registry::new();
+        let exec = Arc::new(Executor::new(reg, Config::default()));
+        APCoreMCP::builder()
+            .backend(BackendSource::Executor(exec.clone()))
+            .middleware_batch(vec![
+                Box::new(RetryMiddleware::new(Default::default())) as Box<dyn apcore::Middleware>,
+                Box::new(LoggingMiddleware::new(true, true, true)) as Box<dyn apcore::Middleware>,
+            ])
+            .build()
+            .expect("build should succeed");
+        let names = exec.middlewares();
+        assert!(
+            names.iter().any(|n| n == "retry") && names.iter().any(|n| n == "logging"),
+            "expected both 'retry' and 'logging', got {names:?}"
+        );
+    }
+
+    // -- ACL support tests (Phase 1.2) -----------------------------------------
+
+    #[test]
+    fn builder_acl_setter_installs_on_executor() {
+        use apcore::{ACLRule, ACL};
+        let reg = Registry::new();
+        let exec = Arc::new(Executor::new(reg, Config::default()));
+        let acl = ACL::new(
+            vec![ACLRule {
+                callers: vec!["role:admin".to_string()],
+                targets: vec!["sys.*".to_string()],
+                effect: "allow".to_string(),
+                description: None,
+                conditions: None,
+            }],
+            "deny",
+            None,
+        );
+        APCoreMCP::builder()
+            .backend(BackendSource::Executor(exec.clone()))
+            .acl(acl)
+            .build()
+            .expect("build should succeed");
+        let installed = exec.acl();
+        assert!(installed.is_some(), "expected ACL on executor");
+        assert_eq!(installed.unwrap().rules().len(), 1);
+    }
+
+    #[test]
+    fn builder_without_acl_leaves_executor_acl_unset() {
+        let reg = Registry::new();
+        let exec = Arc::new(Executor::new(reg, Config::default()));
+        APCoreMCP::builder()
+            .backend(BackendSource::Executor(exec.clone()))
+            .build()
+            .expect("build should succeed");
+        // Note: Config Bus `mcp.acl` may be read here. Assert only the
+        // caller-did-not-set-ACL path — if tests are run with a config file
+        // that defines acl, this assertion is skipped.
+        if crate::config::get_acl_config().is_none() {
+            assert!(exec.acl().is_none(), "expected no ACL when none supplied");
+        }
     }
 
     // -- Struct and accessor tests (Task 5) -----------------------------------

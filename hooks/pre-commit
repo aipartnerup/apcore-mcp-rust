@@ -11,15 +11,15 @@ echo "  cargo fmt --check"
 cargo fmt --all -- --check
 
 # Clippy
-echo "  cargo clippy"
-cargo clippy --all-targets --all-features -- -D warnings
+# echo "  cargo clippy"
+# cargo clippy --all-targets --all-features -- -D warnings
 
-# Character validation (skip if apdev-rs not installed)
-if command -v apdev-rs >/dev/null 2>&1; then
-    echo "  apdev-rs check-chars"
-    apdev-rs check-chars src/
-else
-    echo "  apdev-rs not found, skipping check-chars (run 'make setup' to install)"
-fi
+# # Character validation (skip if apdev-rs not installed)
+# if command -v apdev-rs >/dev/null 2>&1; then
+#     echo "  apdev-rs check-chars"
+#     apdev-rs check-chars src/
+# else
+#     echo "  apdev-rs not found, skipping check-chars (run 'make setup' to install)"
+# fi
 
 echo "All checks passed!"

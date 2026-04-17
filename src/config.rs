@@ -39,6 +39,32 @@ pub fn get_pipeline_config() -> Option<serde_json::Value> {
     ns_value.get("pipeline").cloned().filter(|v| !v.is_null())
 }
 
+/// Attempt to read the `mcp.middleware` configuration from the Config Bus.
+///
+/// Returns `Some(Value)` (expected to be a JSON array) if a "middleware" key
+/// exists in the MCP namespace configuration, `None` otherwise. Consumed by
+/// `middleware_builder::build_middleware_from_config` during `build()`.
+pub fn get_middleware_config() -> Option<serde_json::Value> {
+    let config = Config::discover().ok()?;
+    let ns_value = config.namespace(MCP_NAMESPACE)?;
+    ns_value
+        .get("middleware")
+        .cloned()
+        .filter(|v| !v.is_null() && v.as_array().is_some_and(|a| !a.is_empty()))
+}
+
+/// Attempt to read the `mcp.acl` configuration from the Config Bus.
+///
+/// Returns `Some(Value)` (expected to be a JSON object with `rules` and
+/// optional `default_effect`) if an "acl" key exists and is non-null in the
+/// MCP namespace configuration, `None` otherwise. Consumed by
+/// `acl_builder::build_acl_from_config` during `build()`.
+pub fn get_acl_config() -> Option<serde_json::Value> {
+    let config = Config::discover().ok()?;
+    let ns_value = config.namespace(MCP_NAMESPACE)?;
+    ns_value.get("acl").cloned().filter(|v| !v.is_null())
+}
+
 /// Returns the default configuration values for the MCP namespace.
 pub fn mcp_defaults() -> serde_json::Value {
     serde_json::json!({
@@ -50,7 +76,13 @@ pub fn mcp_defaults() -> serde_json::Value {
         "validate_inputs": false,
         "explorer": false,
         "explorer_prefix": "/explorer",
-        "require_auth": true
+        "require_auth": true,
+        // Declarative middleware list. Each entry is { type: string, ...kwargs }.
+        // See `middleware_builder::build_middleware_from_config` for supported types.
+        "middleware": [],
+        // Declarative ACL — { default_effect: "deny"|"allow", rules: [ACLRule...] }.
+        // `null` or missing means "no ACL" (allow all). See `acl_builder::build_acl_from_config`.
+        "acl": null
     })
 }
 

@@ -65,16 +65,23 @@ impl RegistryListener {
                         let output_schema = _module.output_schema();
 
                         let descriptor = ModuleDescriptor {
-                            name: module_id.to_string(),
-                            annotations: apcore::module::ModuleAnnotations::default(),
+                            module_id: module_id.to_string(),
+                            name: None,
+                            description: description.clone(),
+                            documentation: None,
                             input_schema,
                             output_schema,
-                            enabled: true,
+                            version: "1.0.0".to_string(),
                             tags: vec![],
+                            annotations: Some(apcore::module::ModuleAnnotations::default()),
+                            examples: vec![],
+                            metadata: std::collections::HashMap::new(),
+                            sunset_date: None,
                             dependencies: vec![],
+                            enabled: true,
                         };
 
-                        match factory.build_tool(&descriptor, &description, None, None) {
+                        match factory.build_tool(&descriptor, &description, None) {
                             Ok(tool) => {
                                 if let Ok(mut map) = tools.write() {
                                     map.insert(module_id.to_string(), tool);
@@ -423,13 +430,20 @@ mod tests {
         listener.start(&mut registry, factory);
 
         let descriptor = apcore::registry::ModuleDescriptor {
-            name: "dummy_a".to_string(),
-            annotations: apcore::module::ModuleAnnotations::default(),
+            module_id: "dummy_a".to_string(),
+            name: None,
+            description: String::new(),
+            documentation: None,
             input_schema: json!({"type": "object", "properties": {}}),
             output_schema: json!({"type": "object"}),
-            enabled: true,
+            version: "1.0.0".to_string(),
             tags: vec![],
+            annotations: Some(apcore::module::ModuleAnnotations::default()),
+            examples: vec![],
+            metadata: std::collections::HashMap::new(),
+            sunset_date: None,
             dependencies: vec![],
+            enabled: true,
         };
 
         registry
@@ -451,13 +465,20 @@ mod tests {
         listener.stop();
 
         let descriptor = apcore::registry::ModuleDescriptor {
-            name: "dummy_b".to_string(),
-            annotations: apcore::module::ModuleAnnotations::default(),
+            module_id: "dummy_b".to_string(),
+            name: None,
+            description: String::new(),
+            documentation: None,
             input_schema: json!({"type": "object", "properties": {}}),
             output_schema: json!({"type": "object"}),
-            enabled: true,
+            version: "1.0.0".to_string(),
             tags: vec![],
+            annotations: Some(apcore::module::ModuleAnnotations::default()),
+            examples: vec![],
+            metadata: std::collections::HashMap::new(),
+            sunset_date: None,
             dependencies: vec![],
+            enabled: true,
         };
 
         registry
@@ -477,13 +498,20 @@ mod tests {
         listener.start(&mut registry, Arc::clone(&factory));
 
         let descriptor = apcore::registry::ModuleDescriptor {
-            name: "dummy_c".to_string(),
-            annotations: apcore::module::ModuleAnnotations::default(),
+            module_id: "dummy_c".to_string(),
+            name: None,
+            description: String::new(),
+            documentation: None,
             input_schema: json!({"type": "object", "properties": {}}),
             output_schema: json!({"type": "object"}),
-            enabled: true,
+            version: "1.0.0".to_string(),
             tags: vec![],
+            annotations: Some(apcore::module::ModuleAnnotations::default()),
+            examples: vec![],
+            metadata: std::collections::HashMap::new(),
+            sunset_date: None,
             dependencies: vec![],
+            enabled: true,
         };
 
         registry
