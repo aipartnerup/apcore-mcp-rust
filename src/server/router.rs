@@ -12,8 +12,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_stream::Stream;
 
+use apcore::trace_context::{TraceContext, TraceParent};
+
 use crate::auth::middleware::AUTH_IDENTITY;
 use crate::helpers::{ElicitResult, MCP_ELICIT_KEY, MCP_PROGRESS_KEY};
+use crate::server::async_task_bridge::AsyncTaskBridge;
 
 /// A boxed stream of result chunks from a streaming executor.
 pub type StreamResult = Pin<Box<dyn Stream<Item = Result<Value, ExecutorError>> + Send>>;
@@ -247,6 +250,12 @@ pub struct ExecutionRouter {
     /// Per-tool output schemas for `redact_sensitive` output redaction.
     /// Keys are tool names, values are their output JSON Schema definitions.
     output_schemas: HashMap<String, Value>,
+    /// Optional bridge for routing async-hinted modules and handling
+    /// `__apcore_task_*` meta-tools.
+    async_bridge: Option<Arc<AsyncTaskBridge>>,
+    /// Set of module ids classified as async (routed through the
+    /// [`AsyncTaskBridge`] rather than the normal executor path).
+    async_module_ids: std::collections::HashSet<String>,
 }
 
 impl ExecutionRouter {
@@ -264,6 +273,8 @@ impl ExecutionRouter {
             output_formatter: None,
             tool_schemas: HashMap::new(),
             output_schemas: HashMap::new(),
+            async_bridge: None,
+            async_module_ids: std::collections::HashSet::new(),
         }
     }
 
@@ -283,6 +294,8 @@ impl ExecutionRouter {
             output_formatter,
             tool_schemas: HashMap::new(),
             output_schemas: HashMap::new(),
+            async_bridge: None,
+            async_module_ids: std::collections::HashSet::new(),
         }
     }
 
@@ -305,6 +318,8 @@ impl ExecutionRouter {
             output_formatter,
             tool_schemas: HashMap::new(),
             output_schemas: HashMap::new(),
+            async_bridge: None,
+            async_module_ids: std::collections::HashSet::new(),
         }
     }
 
@@ -347,6 +362,25 @@ impl ExecutionRouter {
     pub fn with_trace(mut self, trace: bool) -> Self {
         self.trace = trace;
         self
+    }
+
+    /// Attach an [`AsyncTaskBridge`] so the router can route async-hinted
+    /// modules through `AsyncTaskManager::submit` and service the reserved
+    /// `__apcore_task_*` meta-tools.
+    pub fn with_async_bridge(
+        mut self,
+        bridge: Arc<AsyncTaskBridge>,
+        async_ids: std::collections::HashSet<String>,
+    ) -> Self {
+        self.async_bridge = Some(bridge);
+        self.async_module_ids = async_ids;
+        self
+    }
+
+    /// Direct accessor used by tests and callers that need to cancel tasks
+    /// on session disconnect.
+    pub fn async_bridge(&self) -> Option<&Arc<AsyncTaskBridge>> {
+        self.async_bridge.as_ref()
     }
 
     /// Redact sensitive fields from tool inputs for safe logging.
@@ -539,7 +573,10 @@ impl ExecutionRouter {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        // Build per-call context
+        // Parse W3C traceparent from `_meta.traceparent` (if present).
+        let trace_parent = Self::extract_traceparent(extra);
+
+        // Build per-call context with inherited trace_id when provided.
         let call_extra = CallExtra {
             progress_token,
             send_notification,
@@ -547,7 +584,44 @@ impl ExecutionRouter {
             identity,
             typed_identity: None,
         };
-        let (context_value, _context_data, _apcore_ctx) = Self::build_context(&call_extra);
+        let (context_value, _context_data, apcore_ctx) =
+            Self::build_context_with_trace(&call_extra, trace_parent.clone());
+
+        // Short-circuit async-task meta-tools and async-routed modules via
+        // the AsyncTaskBridge, when configured.
+        if let Some(bridge) = &self.async_bridge {
+            let progress_token_val = extra.and_then(|v| v.get("progressToken")).cloned();
+            let session_key = extra
+                .and_then(|v| v.get("sessionId"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let resolved_identity = call_extra
+                .identity
+                .as_ref()
+                .and_then(|v| serde_json::from_value::<apcore::Identity>(v.clone()).ok());
+            if let Some(result) = bridge.handle_meta_tool(
+                tool_name,
+                arguments,
+                resolved_identity.clone(),
+                progress_token_val.clone(),
+                session_key.as_deref(),
+            ) {
+                return Self::meta_tool_response(result, &apcore_ctx);
+            }
+            if self.async_module_ids.contains(tool_name) {
+                let res = bridge.submit(
+                    tool_name,
+                    arguments.clone(),
+                    resolved_identity,
+                    progress_token_val,
+                    session_key.as_deref(),
+                );
+                return Self::meta_tool_response(
+                    res.map(|info| serde_json::to_value(info).unwrap_or(Value::Null)),
+                    &apcore_ctx,
+                );
+            }
+        }
 
         // Re-extract after building context (we moved them into CallExtra)
         let (progress_token, send_notification, _, _) = Self::extract_extra(extra);
@@ -684,6 +758,68 @@ impl ExecutionRouter {
     // Task 4: Context construction
     // -----------------------------------------------------------------------
 
+    /// Build the ContentItem response for an async-bridge meta-tool result.
+    ///
+    /// Serialises the JSON result into a text content item, mapping
+    /// apcore errors through the error mapper so the MCP client sees a
+    /// protocol error payload. Returns the `trace_id` from the current
+    /// apcore context so callers can attach `_meta.traceparent`.
+    fn meta_tool_response(
+        result: Result<Value, apcore::errors::ModuleError>,
+        apcore_ctx: &apcore::Context<Value>,
+    ) -> (Vec<ContentItem>, bool, Option<String>) {
+        match result {
+            Ok(value) => {
+                let text = serde_json::to_string(&value).unwrap_or_else(|_| "null".to_string());
+                (
+                    vec![ContentItem {
+                        content_type: "text".into(),
+                        data: Value::String(text),
+                    }],
+                    false,
+                    Some(apcore_ctx.trace_id.clone()),
+                )
+            }
+            Err(err) => {
+                let mapped = crate::adapters::errors::ErrorMapper::to_mcp_error(&err);
+                let text = serde_json::to_string(&mapped).unwrap_or_else(|_| err.to_string());
+                (
+                    vec![ContentItem {
+                        content_type: "text".into(),
+                        data: Value::String(text),
+                    }],
+                    true,
+                    Some(apcore_ctx.trace_id.clone()),
+                )
+            }
+        }
+    }
+
+    /// Extract a W3C `TraceParent` from an MCP `_meta` value.
+    ///
+    /// Returns `None` when `_meta` is absent, when `_meta.traceparent` is
+    /// missing, or when the string fails validation. Uses apcore's
+    /// built-in header validation (W3C §2.2).
+    pub fn extract_traceparent(extra: Option<&Value>) -> Option<TraceParent> {
+        let raw = extra?.get("traceparent")?.as_str()?;
+        let mut headers = HashMap::new();
+        headers.insert("traceparent".to_string(), raw.to_string());
+        TraceContext::extract(&headers)
+    }
+
+    /// Inject a `traceparent` header derived from an apcore `Context`
+    /// into the `_meta` object returned to the MCP client.
+    ///
+    /// Returns a `Value::Object` with the `traceparent` field set, ready
+    /// to be merged into the tool response's `_meta`.
+    pub fn inject_traceparent_meta(apcore_ctx: &apcore::Context<Value>) -> Value {
+        let headers = TraceContext::inject(apcore_ctx);
+        match headers.get("traceparent") {
+            Some(tp) => serde_json::json!({ "traceparent": tp }),
+            None => Value::Object(serde_json::Map::new()),
+        }
+    }
+
     /// Build execution context with MCP callbacks and identity.
     ///
     /// Constructs a JSON context value and an `apcore::Context<Value>`.
@@ -697,6 +833,19 @@ impl ExecutionRouter {
     /// into JSON, and `apcore_context` is the proper apcore `Context`.
     fn build_context(
         extra: &CallExtra,
+    ) -> (
+        Value,
+        HashMap<String, Box<dyn std::any::Any + Send + Sync>>,
+        apcore::Context<Value>,
+    ) {
+        Self::build_context_with_trace(extra, None)
+    }
+
+    /// Like [`build_context`] but inherits the W3C trace_id from
+    /// `trace_parent` when provided.
+    fn build_context_with_trace(
+        extra: &CallExtra,
+        trace_parent: Option<TraceParent>,
     ) -> (
         Value,
         HashMap<String, Box<dyn std::any::Any + Send + Sync>>,
@@ -718,10 +867,20 @@ impl ExecutionRouter {
             })
             .or_else(|| AUTH_IDENTITY.try_with(|id| id.clone()).ok().flatten());
 
-        // Construct apcore::Context with or without identity
-        let apcore_ctx: apcore::Context<Value> = match resolved_identity {
-            Some(ref identity) => apcore::Context::new(identity.clone()),
-            None => apcore::Context::anonymous(),
+        // Construct apcore::Context with or without identity.
+        // When `trace_parent` is Some, use ContextBuilder so the incoming
+        // W3C trace_id propagates into the Context (subject to apcore's
+        // validation per PROTOCOL_SPEC §10.5).
+        let apcore_ctx: apcore::Context<Value> = match (&resolved_identity, &trace_parent) {
+            (Some(ident), Some(_)) => apcore::Context::<Value>::builder()
+                .identity(Some(ident.clone()))
+                .trace_parent(trace_parent.clone())
+                .build(),
+            (None, Some(_)) => apcore::Context::<Value>::builder()
+                .trace_parent(trace_parent.clone())
+                .build(),
+            (Some(ident), None) => apcore::Context::new(ident.clone()),
+            (None, None) => apcore::Context::anonymous(),
         };
 
         let has_progress = extra.progress_token.is_some() && extra.send_notification.is_some();
@@ -1388,6 +1547,8 @@ mod tests {
             output_formatter: Some(formatter),
             tool_schemas: HashMap::new(),
             output_schemas: HashMap::new(),
+            async_bridge: None,
+            async_module_ids: std::collections::HashSet::new(),
         };
         let result = router.format_result(&json!({"a": 1, "b": 2}));
         assert_eq!(result, "custom: 2 keys");
@@ -1404,6 +1565,8 @@ mod tests {
             output_formatter: Some(formatter),
             tool_schemas: HashMap::new(),
             output_schemas: HashMap::new(),
+            async_bridge: None,
+            async_module_ids: std::collections::HashSet::new(),
         };
         // Non-object values should fall back to JSON
         assert_eq!(router.format_result(&json!("string")), r#""string""#);
@@ -1422,6 +1585,8 @@ mod tests {
             output_formatter: Some(formatter),
             tool_schemas: HashMap::new(),
             output_schemas: HashMap::new(),
+            async_bridge: None,
+            async_module_ids: std::collections::HashSet::new(),
         };
         // Should fall back to JSON when formatter returns an error
         let result = router.format_result(&json!({"key": "value"}));
@@ -3242,5 +3407,143 @@ mod tests {
         let (_content, is_error, _) = router.handle_call("mod", &json!({}), Some(&meta)).await;
         assert!(!is_error);
         assert_eq!(captured.lock().unwrap().clone(), Some("2.0.1".to_string()));
+    }
+
+    // ==================================================================
+    // P0 #1: W3C traceparent ↔ MCP _meta.traceparent
+    // ==================================================================
+
+    #[test]
+    fn extract_traceparent_parses_valid_header() {
+        let meta = json!({
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        });
+        let tp = ExecutionRouter::extract_traceparent(Some(&meta)).expect("must parse");
+        assert_eq!(tp.trace_id, "4bf92f3577b34da6a3ce929d0e0e4736");
+        assert_eq!(tp.parent_id, "00f067aa0ba902b7");
+    }
+
+    #[test]
+    fn extract_traceparent_none_when_missing() {
+        let meta = json!({});
+        assert!(ExecutionRouter::extract_traceparent(Some(&meta)).is_none());
+    }
+
+    #[test]
+    fn extract_traceparent_none_when_malformed() {
+        let meta = json!({ "traceparent": "not-a-valid-header" });
+        assert!(ExecutionRouter::extract_traceparent(Some(&meta)).is_none());
+    }
+
+    #[test]
+    fn extract_traceparent_none_when_all_zero_trace_id() {
+        let meta = json!({
+            "traceparent": "00-00000000000000000000000000000000-00f067aa0ba902b7-01"
+        });
+        assert!(ExecutionRouter::extract_traceparent(Some(&meta)).is_none());
+    }
+
+    #[tokio::test]
+    async fn build_context_with_trace_inherits_trace_id() {
+        let meta = json!({
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        });
+        let tp = ExecutionRouter::extract_traceparent(Some(&meta));
+        let extra = CallExtra {
+            progress_token: None,
+            send_notification: None,
+            session: None,
+            identity: None,
+            typed_identity: None,
+        };
+        let (_, _, apcore_ctx) = ExecutionRouter::build_context_with_trace(&extra, tp);
+        assert_eq!(apcore_ctx.trace_id, "4bf92f3577b34da6a3ce929d0e0e4736");
+    }
+
+    #[tokio::test]
+    async fn handle_call_inherits_traceparent_trace_id() {
+        let router = ExecutionRouter::new(Box::new(MockExecutor), false, None);
+        let meta = json!({
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        });
+        let (_content, is_error, trace_id) =
+            router.handle_call("mod", &json!({}), Some(&meta)).await;
+        assert!(!is_error);
+        assert_eq!(
+            trace_id,
+            Some("4bf92f3577b34da6a3ce929d0e0e4736".to_string())
+        );
+    }
+
+    // ==================================================================
+    // P0 #2: AsyncTaskBridge routing from the router
+    // ==================================================================
+
+    fn make_apcore_executor() -> Arc<apcore::executor::Executor> {
+        let registry = Arc::new(apcore::registry::registry::Registry::default());
+        let config = Arc::new(apcore::config::Config::default());
+        Arc::new(apcore::executor::Executor::new(registry, config))
+    }
+
+    #[tokio::test]
+    async fn meta_tool_submit_routes_via_async_bridge() {
+        let bridge = Arc::new(AsyncTaskBridge::new(make_apcore_executor()));
+        let router = ExecutionRouter::new(Box::new(MockExecutor), false, None)
+            .with_async_bridge(bridge, std::collections::HashSet::new());
+        let (content, is_error, trace_id) = router
+            .handle_call(
+                "__apcore_task_submit",
+                &json!({"module_id": "some.module", "arguments": {}}),
+                None,
+            )
+            .await;
+        assert!(!is_error);
+        assert!(trace_id.is_some());
+        // Content must include the task_id envelope.
+        let text = match &content[0].data {
+            Value::String(s) => s.clone(),
+            _ => panic!("expected string content"),
+        };
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        assert!(parsed.get("task_id").is_some());
+        assert_eq!(
+            parsed.get("module_id").and_then(|v| v.as_str()),
+            Some("some.module")
+        );
+    }
+
+    #[tokio::test]
+    async fn async_hinted_module_routes_via_bridge() {
+        let bridge = Arc::new(AsyncTaskBridge::new(make_apcore_executor()));
+        let mut ids = std::collections::HashSet::new();
+        ids.insert("heavy.module".to_string());
+        let router = ExecutionRouter::new(Box::new(MockExecutor), false, None)
+            .with_async_bridge(bridge, ids);
+        let (content, is_error, _) = router.handle_call("heavy.module", &json!({}), None).await;
+        assert!(!is_error);
+        let text = match &content[0].data {
+            Value::String(s) => s.clone(),
+            _ => panic!("expected string content"),
+        };
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        assert!(
+            parsed.get("task_id").is_some(),
+            "bridge submit must return task_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn meta_tool_submit_reserved_id_is_error() {
+        let bridge = Arc::new(AsyncTaskBridge::new(make_apcore_executor()));
+        let router = ExecutionRouter::new(Box::new(MockExecutor), false, None)
+            .with_async_bridge(bridge, std::collections::HashSet::new());
+        let (_content, is_error, _) = router
+            .handle_call(
+                "__apcore_task_submit",
+                &json!({"module_id": "__apcore_something"}),
+                None,
+            )
+            .await;
+        assert!(is_error, "reserved module id must produce an error");
     }
 }

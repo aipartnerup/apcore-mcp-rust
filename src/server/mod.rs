@@ -1,5 +1,6 @@
 //! Server sub-module — MCP server, factory, router, transport, and listener.
 
+pub mod async_task_bridge;
 pub mod factory;
 pub mod listener;
 pub mod router;

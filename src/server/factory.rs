@@ -13,6 +13,7 @@ use apcore::registry::{ModuleDescriptor, Registry};
 
 use crate::adapters::annotations::{AnnotationMapper, McpAnnotations};
 use crate::adapters::schema::SchemaConverter;
+use crate::server::async_task_bridge::AsyncTaskBridge;
 use crate::server::router::ExecutionRouter;
 use crate::server::server::{FactoryError, MCPServer, MCPServerConfig};
 use crate::server::types::{
@@ -290,6 +291,17 @@ impl MCPServerFactory {
         let mut tools = Vec::new();
 
         for module_id in module_ids {
+            // Reject module ids that collide with the reserved async-task
+            // meta-tool namespace (`__apcore_` prefix). These names are
+            // owned by the AsyncTaskBridge; user modules must not shadow
+            // them.
+            if AsyncTaskBridge::is_reserved_id(&module_id) {
+                tracing::warn!(
+                    "Skipped module {}: reserved __apcore_ prefix is owned by AsyncTaskBridge",
+                    module_id
+                );
+                continue;
+            }
             let descriptor = match registry.get_definition(&module_id) {
                 Some(d) => d,
                 None => {
@@ -300,10 +312,14 @@ impl MCPServerFactory {
 
             let base_description = registry.describe(&module_id);
 
-            // Resolve display overlay from descriptor.metadata["display"]["mcp"]
+            // Resolve display overlay. apcore 0.19.0 introduced a top-level
+            // `ModuleDescriptor.display` field; when present, it takes
+            // precedence over `metadata["display"]` (kept for backwards
+            // compatibility with configs that embedded the overlay in metadata).
             let mcp_display = descriptor
-                .metadata
-                .get("display")
+                .display
+                .as_ref()
+                .or_else(|| descriptor.metadata.get("display"))
                 .and_then(|v| v.get("mcp"));
 
             let name_override = mcp_display
@@ -367,7 +383,7 @@ impl MCPServerFactory {
             let router = Arc::clone(&router_clone);
             Box::pin(async move {
                 let extra_ref = extra.as_ref();
-                let (content_items, is_error, _trace_id) =
+                let (content_items, is_error, trace_id) =
                     router.handle_call(&name, &arguments, extra_ref).await;
 
                 // Extract any pipeline trace item for `_meta.trace`.
@@ -385,7 +401,32 @@ impl MCPServerFactory {
                     }
                 }
 
-                let meta = meta_trace.map(|t| serde_json::json!({ "trace": t }));
+                // Build `_meta` with pipeline trace and/or W3C traceparent.
+                let mut meta_obj = serde_json::Map::new();
+                if let Some(t) = meta_trace {
+                    meta_obj.insert("trace".to_string(), t);
+                }
+                if let Some(tid) = trace_id.as_deref() {
+                    // Synthesize a W3C traceparent from the context trace_id.
+                    // Strip dashes to produce 32 lowercase hex chars; generate
+                    // a random 8-byte parent span. Matches apcore
+                    // `TraceContext::inject`.
+                    let trace_hex = tid.replace('-', "");
+                    if trace_hex.len() == 32
+                        && trace_hex
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    {
+                        let parent = uuid::Uuid::new_v4().simple().to_string()[..16].to_string();
+                        let tp = format!("00-{trace_hex}-{parent}-01");
+                        meta_obj.insert("traceparent".to_string(), Value::String(tp));
+                    }
+                }
+                let meta = if meta_obj.is_empty() {
+                    None
+                } else {
+                    Some(Value::Object(meta_obj))
+                };
                 CallToolResult {
                     content: text_items,
                     is_error,
@@ -393,6 +434,14 @@ impl MCPServerFactory {
                 }
             })
         }));
+    }
+
+    /// Register the four `__apcore_task_*` meta-tools so they appear in
+    /// `tools/list` responses alongside user modules. Callers must also
+    /// install the `AsyncTaskBridge` on the router via
+    /// [`ExecutionRouter::with_async_bridge`].
+    pub fn append_meta_tools(tools: &mut Vec<Tool>) {
+        tools.extend(AsyncTaskBridge::build_meta_tools());
     }
 
     // ---- Task: register_resources ----
@@ -504,6 +553,7 @@ mod tests {
             annotations: Some(annotations),
             examples: vec![],
             metadata: HashMap::new(),
+            display: None,
             sunset_date: None,
             dependencies: vec![],
             enabled: true,
@@ -524,6 +574,7 @@ mod tests {
             annotations: Some(ModuleAnnotations::default()),
             examples: vec![],
             metadata: HashMap::new(),
+            display: None,
             sunset_date: None,
             dependencies: vec![],
             enabled: true,
@@ -578,6 +629,7 @@ mod tests {
         )
     }
 
+    #[allow(clippy::type_complexity)]
     fn make_registry_with_modules_and_metadata(
         modules: Vec<(&str, &str, Vec<String>, HashMap<String, serde_json::Value>)>,
     ) -> Registry {
@@ -596,6 +648,7 @@ mod tests {
                 annotations: Some(ModuleAnnotations::default()),
                 examples: vec![],
                 metadata,
+                display: None,
                 sunset_date: None,
                 dependencies: vec![],
                 enabled: true,
@@ -1413,5 +1466,27 @@ mod tests {
             tools[0].description,
             "Custom description\n\nGuidance: Important usage notes"
         );
+    }
+
+    #[test]
+    fn is_reserved_id_detection_matches_async_bridge() {
+        // apcore's registry itself rejects module ids starting with `_`,
+        // so the bridge's reserved-prefix filter serves as defense-in-depth
+        // (catching any path that bypasses registry validation).
+        assert!(AsyncTaskBridge::is_reserved_id("__apcore_task_submit"));
+        assert!(AsyncTaskBridge::is_reserved_id("__apcore_custom"));
+        assert!(!AsyncTaskBridge::is_reserved_id("legitimate.module"));
+    }
+
+    #[test]
+    fn append_meta_tools_adds_four_reserved_names() {
+        let mut tools = Vec::new();
+        MCPServerFactory::append_meta_tools(&mut tools);
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names.len(), 4);
+        assert!(names.contains(&"__apcore_task_submit"));
+        assert!(names.contains(&"__apcore_task_status"));
+        assert!(names.contains(&"__apcore_task_cancel"));
+        assert!(names.contains(&"__apcore_task_list"));
     }
 }

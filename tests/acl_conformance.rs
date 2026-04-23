@@ -90,9 +90,7 @@ fn conformance_success_cases() {
                 // behavior path — evaluate a caller/target with no matching
                 // rule and observe the decision. We use a randomised pattern
                 // unlikely to match any rule.
-                let decision = acl
-                    .check(Some("@conformance_probe"), "no_such_module", None)
-                    .unwrap_or(false);
+                let decision = acl.check(Some("@conformance_probe"), "no_such_module", None);
                 let observed = if decision { "allow" } else { "deny" };
                 assert_eq!(
                     observed, expected.default_effect,

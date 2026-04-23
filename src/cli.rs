@@ -202,6 +202,12 @@ pub struct CliArgs {
     /// Pipeline execution strategy.
     #[arg(long, value_enum, help = "Pipeline execution strategy")]
     pub strategy: Option<StrategyPreset>,
+
+    /// Enable the built-in observability stack (auto-wires
+    /// `MetricsMiddleware` and `UsageMiddleware`, and exposes `/metrics`
+    /// (Prometheus) and `/usage` (JSON) endpoints on HTTP transports).
+    #[arg(long, default_value_t = false)]
+    pub observability: bool,
 }
 
 // ── Error type ────────────────────────────────────────────────────────
@@ -417,6 +423,10 @@ pub async fn run() -> Result<(), CliError> {
 
     if let Some(ref strategy) = args.strategy {
         builder = builder.strategy(strategy.as_str());
+    }
+
+    if args.observability {
+        builder = builder.observability(true);
     }
 
     let mcp = builder

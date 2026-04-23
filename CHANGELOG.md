@@ -5,6 +5,148 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-04-23
+
+Leverages apcore 0.19.0 + apcore-toolkit 0.5.0. Wires three apcore modules
+that the bridge previously did not use: `trace_context`, `async_task`, and
+`observability::{metrics,usage}`. Aligns the Rust bridge with the Python
+and TypeScript 0.14.0 implementations.
+
+### Changed
+
+- **`apcore` dependency bumped from `"0.17"` to `"0.19"`** (actual resolution jumps
+  from 0.18.0 to 0.19.0).
+- **New dependency: `apcore-toolkit = "0.5"`** — brings `BindingLoader` /
+  `BindingLoadError` (pure-data reader for `.binding.yaml` with safety caps:
+  16 MiB per file, 10 000 files per dir) and `ScannedModule.display` into the
+  MCP bridge's dependency surface for downstream callers that need to hydrate
+  modules from declarative bindings.
+- **`ModuleDescriptor` struct literals** in `src/apcore_mcp.rs`,
+  `src/server/factory.rs`, `src/server/listener.rs`, and `examples/run/main.rs`
+  updated to supply the new `display: None` field (apcore 0.19.0 breaking
+  change).
+- **`APCoreMCPBuilder::build()` ACL install path** — apcore 0.19.0's
+  `Executor::set_acl` takes `&mut self`. The builder now calls `Arc::get_mut`
+  on the resolved executor; if the `Arc` is already shared (caller passed a
+  clone), the builder returns a `Config` error pointing to the remediation
+  (install ACL on the `Executor` before wrapping it in `Arc`). Affects the
+  `BackendSource::Executor(Arc<Executor>) + .acl(...)` flow.
+- **`ACL::check()` call site** in `tests/acl_conformance.rs` — returns `bool`
+  directly in 0.19.0 (was `Result<bool, _>`).
+- **Executor `acl()` accessor** — now a public field (`exec.acl`) rather than a
+  method in apcore 0.19.0; updated in the two test assertions that inspected it.
+- **`ExecutionRouter` state** carries `async_bridge: Option<Arc<_>>` and
+  `async_module_ids: HashSet<String>`. Non-async paths are bit-for-bit
+  unchanged when the bridge is not attached.
+
+### Added
+
+- **W3C Trace Context propagation** (P0). `src/server/router.rs` now imports
+  `apcore::trace_context::{TraceContext, TraceParent}`, parses inbound
+  `_meta.traceparent` on `tools/call` requests, and threads the resulting
+  trace id through the `apcore::Context` so downstream module invocations
+  inherit the W3C trace chain. Outbound tool responses carry
+  `_meta.traceparent` built via `TraceContext::inject(context)`, so MCP
+  clients can correlate spans across the bridge without bespoke plumbing.
+  Malformed headers are rejected by apcore's strict validator (the bridge
+  does not duplicate that logic).
+- **Async Task Bridge** (`src/server/async_task_bridge.rs`, new, F-043 per
+  `docs/features/async-task-bridge.md`). Exposes apcore's
+  `AsyncTaskManager` through MCP so long-running modules can be submitted,
+  polled, cancelled, and listed without blocking the transport.
+  - `AsyncTaskBridge` struct with `is_async_module` (checks
+    `metadata.async == true` OR `annotations.extra.mcp_async == "true"`),
+    `submit`, `get_status`, `cancel`, `cancel_session_tasks`, `list_tasks`,
+    `shutdown`, plus `is_reserved_id` and `is_async_registered` helpers.
+  - Four reserved meta-tools registered under the `__apcore_task_` prefix:
+    `__apcore_task_submit`, `__apcore_task_status`, `__apcore_task_cancel`,
+    `__apcore_task_list`. `MCPServerFactory::build_tools` rejects any
+    user-registered module id that collides with the reserved prefix.
+  - `ExecutionRouter::with_async_bridge(bridge, async_ids)` installs the
+    bridge; the router routes async-hinted module ids through
+    `AsyncTaskManager::submit` instead of the synchronous executor path
+    and returns a `{task_id, status: "pending"}` envelope immediately.
+  - Progress fan-out: when the caller supplies `_meta.progressToken`,
+    module-side `report_progress(context, ...)` calls flow through as
+    MCP `notifications/progress` tied to the submitting session.
+  - Status projection redacts sensitive fields via `redact_sensitive` using
+    the router's `output_schemas` map so completed results respect the
+    same schema-driven masking as the sync path.
+  - `TaskLimitExceededError` (apcore 0.19.0) is routed through the
+    existing error mapper with `retryable: true`.
+- **TransportManager cancellation forwarding**
+  (`src/server/transport.rs`). New `set_cancel_handler` /
+  `notify_cancel(session_id)` hook. `APCoreMCPBuilder::async_serve` /
+  `serve` wire the handler to `AsyncTaskBridge::cancel_session_tasks` so
+  client disconnects cancel any tasks submitted from that session.
+- **Observability auto-wiring** (P0). New `observability: bool` field on
+  `APCoreMCPConfig` + `--observability` CLI flag + `.observability(true)`
+  builder method.
+  - When enabled, `APCoreMCPBuilder::build` auto-instantiates
+    `apcore::observability::metrics::MetricsCollector` and
+    `apcore::observability::usage::UsageCollector` and installs
+    `MetricsMiddleware` + `UsageMiddleware` on the executor. The
+    transport's `/metrics` endpoint (already exposed via the existing
+    `MetricsExporter` Protocol) now has a real source out of the box.
+  - Blanket `impl MetricsExporter for apcore::…::MetricsCollector` so the
+    apcore collector plugs directly into the bridge's existing metrics
+    surface without an adapter type.
+  - New `UsageExporter` trait + blanket impl for apcore's `UsageCollector`.
+    Adds `/usage` endpoint to `TransportManager` returning per-module
+    summaries (call count, error count, latency, unique callers, trend)
+    as JSON. Endpoint returns 404 when no usage exporter is configured.
+  - A pre-instantiated custom `MetricsExporter` passed by the caller is
+    preserved untouched — auto-wiring only kicks in for the
+    `observability=true` / `metrics=true` zero-config path.
+- **Type-safe error dispatch** — `src/adapters/errors.rs` now matches the
+  new apcore 0.19.0 `ModuleError` variants (`TaskLimitExceeded`,
+  `DependencyNotFound`, `DependencyVersionMismatch`,
+  `BindingSchemaInferenceFailed`, `BindingSchemaModeConflict`,
+  `BindingStrictSchemaIncompatible`, `BindingPolicyViolation`,
+  `VersionConstraintInvalid`) with explicit arms instead of relying only
+  on error-code string matches, tightening cross-language contracts.
+- **8 new `ErrorCode` variants** surfacing apcore 0.19.0 protocol additions:
+  `DependencyNotFound`, `DependencyVersionMismatch`, `TaskLimitExceeded`,
+  `VersionConstraintInvalid`, `BindingSchemaInferenceFailed`,
+  `BindingSchemaModeConflict`, `BindingStrictSchemaIncompatible`,
+  `BindingPolicyViolation`. Total variants: 35 (was 27).
+- **Dependency-error mapping in `ErrorMapper`** — `DependencyNotFound` and
+  `DependencyVersionMismatch` now render a structured, agent-friendly message
+  extracted from `details.module_id` / `dependency_id` / `required` / `actual`
+  so MCP clients don't have to parse the detail bag.
+- **Binding-configuration error routing** — `BindingSchema*` / `TaskLimitExceeded`
+  / `VersionConstraintInvalid` are explicitly routed through `build_detail_response`
+  (detail passthrough + AI guidance attachment) rather than hitting the default
+  branch.
+- **Expanded annotation surface in `AnnotationMapper::to_description_suffix`** —
+  `cache_ttl`, `cache_key_fields`, `pagination_style` are now rendered into the
+  `[Annotations: ...]` block when set to non-default values. `annotations.extra`
+  keys prefixed with `mcp_` are passed through verbatim (F-041, previously
+  blocked on apcore exposing `extra`).
+- **Top-level `ModuleDescriptor.display` precedence** in `MCPServerFactory::build_tools`.
+  The 0.19.0 descriptor adds a canonical `display: Option<Value>` field; it now
+  takes precedence over the legacy `metadata["display"]` overlay (still honored
+  for backwards compatibility).
+
+### Tests
+
+- **788 tests pass** (`cargo test --all-features`): 771 lib + 2 acl + 1
+  adapters + 1 auth + 6 cli + 1 converters + 2 middleware + 1 server + 3
+  doc. Up from 756 before this release.
+- New unit coverage added inline under `#[cfg(test)]` in
+  `src/server/async_task_bridge.rs` (hint detection, reserved-id
+  rejection, submit/status/cancel/list, meta-tool schema, session
+  cancellation), `src/server/router.rs` (traceparent parse + trace-id
+  propagation + outbound `_meta.traceparent`), `src/server/transport.rs`
+  (usage endpoint JSON shape, 404 without exporter, cancel handler
+  invocation), and `src/apcore_mcp.rs` (observability flag auto-wires
+  collectors; disabled path wires nothing; blanket `MetricsExporter` impl
+  routes to `MetricsCollector::export_prometheus`).
+- `error_code_count` guard updated: 27 → 35.
+- `all_python_error_codes_parse` fixture extended with the 8 new canonical names.
+
+---
+
 ## [0.13.0] - 2026-04-06
 
 ### Added

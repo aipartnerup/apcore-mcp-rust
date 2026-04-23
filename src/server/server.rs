@@ -408,6 +408,11 @@ pub struct ServerHandler {
     list_resources: Option<Arc<dyn Fn() -> Vec<Resource> + Send + Sync>>,
     read_resource: Option<ReadResourceHandler>,
     init_options: InitializationOptions,
+    /// Optional cancel handler invoked on `notifications/cancelled` with
+    /// the session id (or request id, serialised). Used to forward
+    /// cancellation to the [`AsyncTaskBridge`].
+    #[allow(clippy::type_complexity)]
+    cancel_handler: Option<Arc<dyn Fn(&str) + Send + Sync>>,
 }
 
 impl ServerHandler {
@@ -423,7 +428,19 @@ impl ServerHandler {
             list_resources: server.list_resources_handler.clone(),
             read_resource: server.read_resource_handler.clone(),
             init_options,
+            cancel_handler: None,
         })
+    }
+
+    /// Install a cancellation handler invoked on `notifications/cancelled`.
+    ///
+    /// The handler receives the stringified `requestId` from the MCP
+    /// cancellation notification (falling back to the `id` field if
+    /// absent). Typically forwards to
+    /// [`AsyncTaskBridge::cancel_session_tasks`].
+    pub fn with_cancel_handler(mut self, handler: Arc<dyn Fn(&str) + Send + Sync>) -> Self {
+        self.cancel_handler = Some(handler);
+        self
     }
 }
 
@@ -596,7 +613,27 @@ impl crate::server::transport::McpHandler for ServerHandler {
                     ServerHandler::rpc_error(-32601, "resources not supported")
                 }
             }
-            "notifications/initialized" | "notifications/cancelled" => RpcResult::Notification,
+            "notifications/initialized" => RpcResult::Notification,
+            "notifications/cancelled" => {
+                // Forward the cancellation to the async-task bridge if a
+                // handler is installed. MCP cancellation notifications
+                // carry the in-flight `requestId` in `params.requestId`
+                // (MCP spec 2025-03-26). We stringify it so the handler
+                // can treat it as an opaque session/task key.
+                if let Some(h) = &self.cancel_handler {
+                    let key = message
+                        .get("params")
+                        .and_then(|p| p.get("requestId"))
+                        .map(|v| match v {
+                            Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        })
+                        .or_else(|| message.get("id").map(|v| v.to_string()))
+                        .unwrap_or_default();
+                    h(&key);
+                }
+                RpcResult::Notification
+            }
             _ => ServerHandler::rpc_error(-32601, format!("unknown method: {method}")),
         };
 
@@ -1164,6 +1201,7 @@ mod tests {
                     resources: None,
                 },
             },
+            cancel_handler: None,
         }
     }
 
@@ -1270,5 +1308,30 @@ mod tests {
             )
             .await;
         assert!(resp.is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelled_notification_invokes_cancel_handler() {
+        use crate::server::transport::McpHandler;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let counter = Arc::new(AtomicUsize::new(0));
+        let last_key = Arc::new(std::sync::Mutex::new(String::new()));
+        let c = Arc::clone(&counter);
+        let k = Arc::clone(&last_key);
+        let h = make_test_handler().with_cancel_handler(Arc::new(move |key: &str| {
+            c.fetch_add(1, Ordering::SeqCst);
+            let mut guard = k.lock().unwrap();
+            *guard = key.to_string();
+        }));
+        let resp = h
+            .handle_message(serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/cancelled",
+                "params": {"requestId": "req-42"}
+            }))
+            .await;
+        assert!(resp.is_none());
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert_eq!(last_key.lock().unwrap().as_str(), "req-42");
     }
 }

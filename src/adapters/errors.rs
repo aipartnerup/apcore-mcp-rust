@@ -215,6 +215,86 @@ impl ErrorMapper {
 
         // STEP_NOT_FOUND, VERSION_INCOMPATIBLE → handled by default passthrough below.
 
+        // DependencyNotFound / DependencyVersionMismatch — apcore 0.19.0 §5.3 /
+        // §5.15.2. Emit a structured message so agents can react to missing /
+        // incompatible-version deps without parsing `details`.
+        if code == ApcoreErrorCode::DependencyNotFound {
+            let module_id = error
+                .details
+                .get("module_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let dep_id = error
+                .details
+                .get("dependency_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let message = format!(
+                "Module '{module_id}' requires dependency '{dep_id}', which is not registered"
+            );
+            return build_detail_response(error, error_type, message);
+        }
+        if code == ApcoreErrorCode::DependencyVersionMismatch {
+            let module_id = error
+                .details
+                .get("module_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let dep_id = error
+                .details
+                .get("dependency_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let required = error
+                .details
+                .get("required")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unspecified>");
+            let actual = error
+                .details
+                .get("actual")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unknown>");
+            let message = format!(
+                "Module '{module_id}' requires '{dep_id}' {required}, but registered version is {actual}"
+            );
+            return build_detail_response(error, error_type, message);
+        }
+
+        // apcore 0.19.0 binding-configuration errors: keep the original message
+        // but pass details through so surfaces can inspect `module_id`,
+        // `declared_mode`, etc. Default passthrough already does that, but we
+        // route them explicitly to document the contract.
+        if matches!(
+            code,
+            ApcoreErrorCode::BindingSchemaInferenceFailed
+                | ApcoreErrorCode::BindingSchemaModeConflict
+                | ApcoreErrorCode::BindingStrictSchemaIncompatible
+                | ApcoreErrorCode::BindingPolicyViolation
+                | ApcoreErrorCode::VersionConstraintInvalid
+        ) {
+            return build_detail_response(error, error_type, error.message.clone());
+        }
+
+        // Async-task capacity: map `TaskLimitExceeded` to a retryable
+        // envelope with an explicit agent-facing message, mirroring the
+        // MCP async-task-bridge spec (`ASYNC_CAPACITY_EXCEEDED`).
+        if code == ApcoreErrorCode::TaskLimitExceeded {
+            let mut resp = build_detail_response(error, error_type, error.message.clone());
+            if resp.retryable.is_none() {
+                resp.retryable = Some(true);
+            }
+            if resp.ai_guidance.is_none() {
+                resp.ai_guidance = Some(
+                    "AsyncTaskManager has reached its max_tasks cap. \
+                     Wait for in-flight tasks to complete, or cancel \
+                     tasks via __apcore_task_cancel before retrying."
+                        .to_string(),
+                );
+            }
+            return resp;
+        }
+
         // Default: pass through message and details
         let details_value = if error.details.is_empty() {
             None

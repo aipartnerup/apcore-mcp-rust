@@ -183,6 +183,15 @@ pub struct APCoreMCPConfig {
     /// Enable pipeline trace mode. When true, tool responses include
     /// pipeline trace data (strategy name, duration, steps).
     pub trace: bool,
+    /// Enable the built-in observability middleware stack.
+    ///
+    /// When `true`, the builder constructs a shared apcore
+    /// [`MetricsCollector`](apcore::observability::metrics::MetricsCollector)
+    /// plus [`UsageCollector`](apcore::observability::usage::UsageCollector)
+    /// and installs the corresponding middleware on the executor. The
+    /// metrics collector is also exposed at `/metrics` (Prometheus) and the
+    /// usage collector at `/usage` (JSON summaries).
+    pub observability: bool,
 }
 
 impl Default for APCoreMCPConfig {
@@ -210,6 +219,7 @@ impl Default for APCoreMCPConfig {
             allow_execute: false,
             strategy: None,
             trace: false,
+            observability: false,
         }
     }
 }
@@ -286,6 +296,10 @@ pub struct APCoreMCP {
     /// Optional authenticator for HTTP transport auth middleware.
     authenticator: Option<Arc<dyn Authenticator>>,
     metrics_collector: Option<Arc<dyn MetricsExporter>>,
+    /// Auto-instantiated apcore metrics collector (when `observability=true`).
+    auto_metrics: Option<Arc<apcore::observability::metrics::MetricsCollector>>,
+    /// Auto-instantiated apcore usage collector (when `observability=true`).
+    auto_usage: Option<Arc<apcore::observability::usage::UsageCollector>>,
     /// Reserved — accepted by builder but not yet passed to
     /// `ExecutionRouter::new_with_formatter` (requires converting to
     /// `Arc<dyn Fn>` or taking `&mut self`).
@@ -376,6 +390,7 @@ impl APCoreMCP {
             Vec<Tool>,
             InitializationOptions,
             String,
+            Option<Arc<crate::server::async_task_bridge::AsyncTaskBridge>>,
         ),
         APCoreMCPError,
     > {
@@ -412,7 +427,28 @@ impl APCoreMCP {
             map
         };
 
-        // Create execution router backed by the real apcore Executor.
+        // Classify async-hinted modules (metadata.async / annotations.extra.mcp_async).
+        use crate::server::async_task_bridge::AsyncTaskBridge;
+        let mut async_ids = std::collections::HashSet::new();
+        for module_id in self.reg().list(tags_slice, prefix) {
+            if AsyncTaskBridge::is_async_registered(self.reg(), &module_id) {
+                async_ids.insert(module_id);
+            }
+        }
+
+        // Build an AsyncTaskBridge backed by the same executor.
+        let bridge = Arc::new(
+            AsyncTaskBridge::new(Arc::clone(&self.executor))
+                .with_output_schemas(output_schema_map.clone()),
+        );
+
+        // Append the four `__apcore_task_*` meta-tools to the tool list so
+        // clients see them in `tools/list`.
+        let mut tools = tools;
+        MCPServerFactory::append_meta_tools(&mut tools);
+
+        // Create execution router backed by the real apcore Executor, and
+        // wire in the async bridge.
         let adapter = ApcoreExecutorAdapter {
             inner: Arc::clone(&self.executor),
         };
@@ -420,7 +456,8 @@ impl APCoreMCP {
             ExecutionRouter::new(Box::new(adapter), self.config.validate_inputs, None)
                 .with_redact_output(self.config.redact_output)
                 .with_trace(self.config.trace)
-                .with_output_schemas(output_schema_map),
+                .with_output_schemas(output_schema_map)
+                .with_async_bridge(Arc::clone(&bridge), async_ids),
         );
 
         // Register handlers
@@ -432,7 +469,7 @@ impl APCoreMCP {
         // Build init options
         let init_options = factory.build_init_options(&server, &self.config.name, &version);
 
-        Ok((server, router, tools, init_options, version))
+        Ok((server, router, tools, init_options, version, Some(bridge)))
     }
 
     /// Build an [`ExplorerConfig`] from the given tools and explorer parameters.
@@ -525,7 +562,8 @@ impl APCoreMCP {
             ));
         }
 
-        let (server, router, tools, init_options, version) = self.build_server_components()?;
+        let (server, router, tools, init_options, version, async_bridge) =
+            self.build_server_components()?;
 
         tracing::info!(
             "Starting MCP server '{}' v{} with {} tools via {}",
@@ -535,15 +573,52 @@ impl APCoreMCP {
             transport,
         );
 
-        let mut transport_manager = TransportManager::new(self.metrics_collector.clone());
+        let effective_metrics: Option<Arc<dyn MetricsExporter>> =
+            self.metrics_collector.clone().or_else(|| {
+                self.auto_metrics
+                    .clone()
+                    .map(|m| m as Arc<dyn MetricsExporter>)
+            });
+        let mut transport_manager = TransportManager::new(effective_metrics);
         transport_manager.set_module_count(tools.len());
+        if let Some(ref usage) = self.auto_usage {
+            let exporter: Arc<dyn crate::server::transport::UsageExporter> = usage.clone();
+            transport_manager.set_usage_exporter(Some(exporter));
+        }
+        if let Some(ref bridge) = async_bridge {
+            let bridge_weak = Arc::downgrade(bridge);
+            transport_manager.set_cancel_handler(Some(Arc::new(move |session_id: &str| {
+                if let Some(b) = bridge_weak.upgrade() {
+                    let n = b.cancel_session_tasks(session_id);
+                    if n > 0 {
+                        tracing::info!(
+                            "Cancelled {n} async task(s) for session {session_id} on client disconnect"
+                        );
+                    }
+                }
+            })));
+        }
         let transport_manager = Arc::new(transport_manager);
 
-        // Build the McpHandler from the server's registered handlers.
-        let handler: Arc<dyn crate::server::transport::McpHandler> = Arc::new(
-            ServerHandler::from_server(&server, init_options)
-                .ok_or_else(|| APCoreMCPError::ServerError("no tool handlers registered".into()))?,
-        );
+        // Build the McpHandler from the server's registered handlers and
+        // install the async-task cancel bridge so that MCP
+        // `notifications/cancelled` triggers cooperative task cancellation.
+        let mut server_handler = ServerHandler::from_server(&server, init_options)
+            .ok_or_else(|| APCoreMCPError::ServerError("no tool handlers registered".into()))?;
+        if let Some(ref bridge) = async_bridge {
+            let bridge_weak = Arc::downgrade(bridge);
+            server_handler = server_handler.with_cancel_handler(Arc::new(move |key: &str| {
+                if let Some(b) = bridge_weak.upgrade() {
+                    // Cancel any task whose session_key matches, plus also
+                    // try treating the key as a direct task_id.
+                    let n = b.cancel_session_tasks(key);
+                    if n == 0 {
+                        b.cancel(key);
+                    }
+                }
+            }));
+        }
+        let handler: Arc<dyn crate::server::transport::McpHandler> = Arc::new(server_handler);
 
         // Build explorer router if enabled on HTTP transport.
         let explorer_router = if opts.explorer.explorer && transport != "stdio" {
@@ -640,7 +715,8 @@ impl APCoreMCP {
             return Err(APCoreMCPError::InvalidExplorerPrefix);
         }
 
-        let (mut server, router, tools, _init_options, version) = self.build_server_components()?;
+        let (mut server, router, tools, _init_options, version, async_bridge) =
+            self.build_server_components()?;
 
         tracing::info!(
             "Building MCP app '{}' v{} with {} tools",
@@ -651,10 +727,33 @@ impl APCoreMCP {
 
         let _listener = Self::maybe_start_listener(opts.dynamic);
 
-        // Build the transport manager
-        let mut transport_manager = TransportManager::new(self.metrics_collector.clone());
+        // Build the transport manager with optional auto-wired observability
+        // exporters.
+        let effective_metrics: Option<Arc<dyn MetricsExporter>> =
+            self.metrics_collector.clone().or_else(|| {
+                self.auto_metrics
+                    .clone()
+                    .map(|m| m as Arc<dyn MetricsExporter>)
+            });
+        let mut transport_manager = TransportManager::new(effective_metrics);
         transport_manager.set_module_count(tools.len());
+        if let Some(ref usage) = self.auto_usage {
+            let exporter: Arc<dyn crate::server::transport::UsageExporter> = usage.clone();
+            transport_manager.set_usage_exporter(Some(exporter));
+        }
+        if let Some(ref bridge) = async_bridge {
+            let bridge_weak = Arc::downgrade(bridge);
+            transport_manager.set_cancel_handler(Some(Arc::new(move |session_id: &str| {
+                if let Some(b) = bridge_weak.upgrade() {
+                    b.cancel_session_tasks(session_id);
+                }
+            })));
+        }
         let transport_manager = Arc::new(transport_manager);
+        // Silence unused-variable warning; router/bridge are kept alive via
+        // the ExecutionRouter stored on the server handler.
+        let _ = &router;
+        let _ = &async_bridge;
 
         // Start the server
         server
@@ -1051,6 +1150,22 @@ impl APCoreMCPBuilder {
         self
     }
 
+    /// Enable or disable the built-in observability stack.
+    ///
+    /// When enabled, the builder auto-instantiates apcore's
+    /// `MetricsCollector` + `UsageCollector` and installs the matching
+    /// middleware on the executor. Metrics are exposed at `/metrics`
+    /// (Prometheus text format) and usage summaries at `/usage` (JSON).
+    ///
+    /// Caller-supplied `metrics_collector` (via
+    /// [`APCoreMCPBuilder::metrics_collector`]) takes precedence for the
+    /// `/metrics` endpoint, preserving back-compat with custom trait
+    /// object exporters.
+    pub fn observability(mut self, enable: bool) -> Self {
+        self.config.observability = enable;
+        self
+    }
+
     /// Consume the builder and produce an [`APCoreMCP`] instance.
     ///
     /// Validates all inputs matching Python validation order, then resolves
@@ -1135,7 +1250,7 @@ impl APCoreMCPBuilder {
             APCoreMCPError::BackendResolution("backend source is required".to_string())
         })?;
 
-        let (standalone_registry, executor) = match backend {
+        let (standalone_registry, mut executor) = match backend {
             BackendSource::ExtensionsDir(path) => {
                 return Err(APCoreMCPError::BackendResolution(format!(
                     "ExtensionsDir resolution not yet implemented for path: {}",
@@ -1181,8 +1296,55 @@ impl APCoreMCPBuilder {
             }
         };
         if let Some(acl) = effective_acl {
-            executor.set_acl(acl);
+            // `Executor::set_acl` requires `&mut self`. The resolved executor is
+            // held in an `Arc`; if no other strong/weak references exist we can
+            // safely obtain a `&mut` via `Arc::get_mut`. When the caller has
+            // already shared the `Arc` elsewhere, we cannot install the ACL
+            // without breaking aliasing, so we surface a config-time error
+            // rather than silently dropping it.
+            match Arc::get_mut(&mut executor) {
+                Some(exec_mut) => exec_mut.set_acl(acl),
+                None => {
+                    return Err(APCoreMCPError::Config(
+                        "failed to install ACL: Executor Arc is already shared — \
+                         install the ACL on the Executor before passing it to \
+                         APCoreMCPBuilder::backend()"
+                            .to_string(),
+                    ))
+                }
+            }
         }
+
+        // ── Auto-wire observability middleware ────────────────────────
+        //
+        // When `observability=true`, auto-instantiate the apcore
+        // MetricsCollector + UsageCollector and install the matching
+        // middleware on the executor. The collectors are retained for
+        // later exposure at `/metrics` and `/usage`.
+        let (auto_metrics, auto_usage) = if self.config.observability {
+            use apcore::observability::metrics::{MetricsCollector, MetricsMiddleware};
+            use apcore::observability::usage::{UsageCollector, UsageMiddleware};
+
+            let metrics = Arc::new(MetricsCollector::new());
+            let usage = Arc::new(UsageCollector::new());
+
+            executor
+                .use_middleware(Box::new(MetricsMiddleware::new((*metrics).clone())))
+                .map_err(|e| {
+                    APCoreMCPError::Config(format!("failed to install MetricsMiddleware: {e}"))
+                })?;
+            executor
+                .use_middleware(Box::new(UsageMiddleware::new((*usage).clone())))
+                .map_err(|e| {
+                    APCoreMCPError::Config(format!("failed to install UsageMiddleware: {e}"))
+                })?;
+            tracing::info!(
+                "Observability middleware auto-wired (MetricsMiddleware + UsageMiddleware)"
+            );
+            (Some(metrics), Some(usage))
+        } else {
+            (None, None)
+        };
 
         Ok(APCoreMCP {
             config: self.config,
@@ -1190,6 +1352,8 @@ impl APCoreMCPBuilder {
             executor,
             authenticator: self.authenticator,
             metrics_collector: self.metrics_collector,
+            auto_metrics,
+            auto_usage,
             output_formatter: self.output_formatter,
             approval_handler: self.approval_handler,
         })
@@ -1438,6 +1602,7 @@ mod tests {
                 annotations: Some(ModuleAnnotations::default()),
                 examples: vec![],
                 metadata: std::collections::HashMap::new(),
+                display: None,
                 sunset_date: None,
                 dependencies: vec![],
                 enabled: true,
@@ -1459,6 +1624,8 @@ mod tests {
             executor,
             authenticator: None,
             metrics_collector: None,
+            auto_metrics: None,
+            auto_usage: None,
             output_formatter: None,
             approval_handler: None,
         }
@@ -1477,6 +1644,8 @@ mod tests {
             executor,
             authenticator: None,
             metrics_collector: None,
+            auto_metrics: None,
+            auto_usage: None,
             output_formatter: None,
             approval_handler: None,
         }
@@ -1503,6 +1672,8 @@ mod tests {
             executor,
             authenticator: None,
             metrics_collector: None,
+            auto_metrics: None,
+            auto_usage: None,
             output_formatter: None,
             approval_handler: None,
         }
@@ -1525,6 +1696,8 @@ mod tests {
             executor,
             authenticator: None,
             metrics_collector: None,
+            auto_metrics: None,
+            auto_usage: None,
             output_formatter: None,
             approval_handler: None,
         }
@@ -1543,6 +1716,8 @@ mod tests {
             executor,
             authenticator: None,
             metrics_collector: None,
+            auto_metrics: None,
+            auto_usage: None,
             output_formatter: None,
             approval_handler: None,
         }
@@ -1846,6 +2021,11 @@ mod tests {
     #[test]
     fn builder_acl_setter_installs_on_executor() {
         use apcore::{ACLRule, ACL};
+        // apcore 0.19.0: `Executor::set_acl` takes `&mut self`. To install an
+        // ACL through `APCoreMCPBuilder`, the backend Executor Arc must be
+        // unique — do NOT hold a clone across the call to `build()`. The
+        // builder surfaces this as a `Config` error; we verify the happy path
+        // here by inspecting the MCP instance's executor.
         let reg = Registry::new();
         let exec = Arc::new(Executor::new(reg, Config::default()));
         let acl = ACL::new(
@@ -1859,12 +2039,12 @@ mod tests {
             "deny",
             None,
         );
-        APCoreMCP::builder()
-            .backend(BackendSource::Executor(exec.clone()))
+        let mcp = APCoreMCP::builder()
+            .backend(BackendSource::Executor(exec))
             .acl(acl)
             .build()
             .expect("build should succeed");
-        let installed = exec.acl();
+        let installed = mcp.executor().acl.as_ref();
         assert!(installed.is_some(), "expected ACL on executor");
         assert_eq!(installed.unwrap().rules().len(), 1);
     }
@@ -1881,7 +2061,7 @@ mod tests {
         // caller-did-not-set-ACL path — if tests are run with a config file
         // that defines acl, this assertion is skipped.
         if crate::config::get_acl_config().is_none() {
-            assert!(exec.acl().is_none(), "expected no ACL when none supplied");
+            assert!(exec.acl.is_none(), "expected no ACL when none supplied");
         }
     }
 
@@ -1959,28 +2139,28 @@ mod tests {
         let mcp = make_test_apcore_mcp();
         let components = mcp.build_server_components();
         assert!(components.is_ok());
-        let (_server, _router, _tools, _init_options, version) = components.unwrap();
+        let (_server, _router, _tools, _init_options, version, _bridge) = components.unwrap();
         assert!(!version.is_empty());
     }
 
     #[test]
     fn build_server_components_uses_custom_version() {
         let mcp = make_test_apcore_mcp_with_version("2.0.0");
-        let (_, _, _, _, version) = mcp.build_server_components().unwrap();
+        let (_, _, _, _, version, _) = mcp.build_server_components().unwrap();
         assert_eq!(version, "2.0.0");
     }
 
     #[test]
     fn build_server_components_defaults_to_crate_version() {
         let mcp = make_test_apcore_mcp();
-        let (_, _, _, _, version) = mcp.build_server_components().unwrap();
+        let (_, _, _, _, version, _) = mcp.build_server_components().unwrap();
         assert_eq!(version, crate::VERSION);
     }
 
     #[test]
     fn build_server_components_applies_tag_filter() {
         let mcp = make_test_apcore_mcp_with_tags(vec!["public".into()]);
-        let (_, _, tools, _, _) = mcp.build_server_components().unwrap();
+        let (_, _, tools, _, _, _) = mcp.build_server_components().unwrap();
         // Only modules with "public" tag
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"mod.public"));
@@ -1991,7 +2171,7 @@ mod tests {
     #[test]
     fn build_server_components_applies_prefix_filter() {
         let mcp = make_test_apcore_mcp_with_prefix("my_tool.");
-        let (_, _, tools, _, _) = mcp.build_server_components().unwrap();
+        let (_, _, tools, _, _, _) = mcp.build_server_components().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"my_tool.a"));
         assert!(names.contains(&"my_tool.b"));
@@ -2001,7 +2181,7 @@ mod tests {
     #[test]
     fn build_server_components_has_init_options() {
         let mcp = make_test_apcore_mcp_with_modules();
-        let (_, _, _, init_options, _) = mcp.build_server_components().unwrap();
+        let (_, _, _, init_options, _, _) = mcp.build_server_components().unwrap();
         assert_eq!(init_options.server_name, "apcore-mcp");
         assert_eq!(init_options.server_version, crate::VERSION);
         // Should have tools capability since we registered handlers
@@ -2013,7 +2193,7 @@ mod tests {
     #[test]
     fn build_server_components_server_has_handlers() {
         let mcp = make_test_apcore_mcp_with_modules();
-        let (server, _, _, _, _) = mcp.build_server_components().unwrap();
+        let (server, _, _, _, _, _) = mcp.build_server_components().unwrap();
         assert!(server.has_tool_handlers());
         assert!(server.has_resource_handlers());
     }
@@ -2021,12 +2201,25 @@ mod tests {
     #[test]
     fn build_server_components_tools_match_registry() {
         let mcp = make_test_apcore_mcp_with_modules();
-        let (_, _, tools, _, _) = mcp.build_server_components().unwrap();
+        let (_, _, tools, _, _, _) = mcp.build_server_components().unwrap();
         let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         let registry_tools = mcp.tools();
-        assert_eq!(tools.len(), registry_tools.len());
+        // Registry tools plus the 4 reserved `__apcore_task_*` meta-tools
+        // auto-appended by the AsyncTaskBridge.
+        assert_eq!(tools.len(), registry_tools.len() + 4);
         for name in &registry_tools {
             assert!(tool_names.contains(&name.as_str()));
+        }
+        for reserved in [
+            "__apcore_task_submit",
+            "__apcore_task_status",
+            "__apcore_task_cancel",
+            "__apcore_task_list",
+        ] {
+            assert!(
+                tool_names.contains(&reserved),
+                "meta-tool {reserved} must be registered"
+            );
         }
     }
 
@@ -2044,6 +2237,8 @@ mod tests {
             executor,
             authenticator: None,
             metrics_collector: None,
+            auto_metrics: None,
+            auto_usage: None,
             output_formatter: None,
             approval_handler: None,
         }
@@ -2225,5 +2420,74 @@ mod tests {
         assert!(mod_a["description"].is_string());
         assert!(mod_a["input_schema"].is_object());
         assert!(mod_a["tags"].is_array());
+    }
+
+    // ==================================================================
+    // P0 #3: Observability auto-wiring
+    // ==================================================================
+
+    #[test]
+    fn observability_flag_auto_wires_collectors() {
+        let executor = Arc::new(Executor::new(Registry::new(), Config::default()));
+        let mcp = APCoreMCP::builder()
+            .backend(executor)
+            .name("obs-test")
+            .observability(true)
+            .build()
+            .expect("build must succeed");
+        assert!(
+            mcp.auto_metrics.is_some(),
+            "MetricsCollector should be auto-instantiated"
+        );
+        assert!(
+            mcp.auto_usage.is_some(),
+            "UsageCollector should be auto-instantiated"
+        );
+    }
+
+    #[test]
+    fn observability_off_does_not_wire_collectors() {
+        let executor = Arc::new(Executor::new(Registry::new(), Config::default()));
+        let mcp = APCoreMCP::builder()
+            .backend(executor)
+            .name("obs-off")
+            .build()
+            .expect("build must succeed");
+        assert!(mcp.auto_metrics.is_none());
+        assert!(mcp.auto_usage.is_none());
+    }
+
+    #[test]
+    fn observability_metrics_has_export_prometheus() {
+        use crate::server::transport::MetricsExporter;
+        let executor = Arc::new(Executor::new(Registry::new(), Config::default()));
+        let mcp = APCoreMCP::builder()
+            .backend(executor)
+            .name("obs-prom")
+            .observability(true)
+            .build()
+            .expect("build must succeed");
+        let metrics = mcp.auto_metrics.as_ref().unwrap().clone();
+        // Exercise the blanket `impl MetricsExporter for MetricsCollector` so
+        // the adapter is actually driven through the trait the bridge uses.
+        let exporter: Arc<dyn MetricsExporter> = metrics;
+        let exported = exporter.export_prometheus();
+        // Empty collector is valid; just ensure the adapter is callable.
+        assert!(exported.is_empty() || exported.contains("# HELP"));
+    }
+
+    #[test]
+    fn observability_usage_exposes_summaries() {
+        use crate::server::transport::UsageExporter;
+        let executor = Arc::new(Executor::new(Registry::new(), Config::default()));
+        let mcp = APCoreMCP::builder()
+            .backend(executor)
+            .name("obs-usage")
+            .observability(true)
+            .build()
+            .expect("build must succeed");
+        let usage = mcp.auto_usage.as_ref().unwrap();
+        let summary = usage.export_json();
+        assert!(summary.get("modules").is_some());
     }
 }

@@ -50,6 +50,40 @@ pub trait MetricsExporter: Send + Sync {
     fn export_prometheus(&self) -> String;
 }
 
+/// Blanket adapter: a shared apcore [`MetricsCollector`] already exposes a
+/// `export_prometheus()` method, so wrap it directly as a `MetricsExporter`.
+impl MetricsExporter for apcore::observability::metrics::MetricsCollector {
+    fn export_prometheus(&self) -> String {
+        apcore::observability::metrics::MetricsCollector::export_prometheus(self)
+    }
+}
+
+/// Trait for exporting usage summaries at the `/usage` endpoint.
+pub trait UsageExporter: Send + Sync {
+    /// Return a JSON summary of module usage (per-module plus per-caller
+    /// breakdown) suitable for JSON serialisation at `/usage`.
+    fn export_json(&self) -> Value;
+}
+
+impl UsageExporter for apcore::observability::usage::UsageCollector {
+    fn export_json(&self) -> Value {
+        let summaries = self.get_all_summaries();
+        serde_json::json!({
+            "modules": summaries
+                .iter()
+                .map(|s| serde_json::json!({
+                    "module_id": s.module_id,
+                    "call_count": s.call_count,
+                    "error_count": s.error_count,
+                    "avg_latency_ms": s.avg_latency_ms,
+                    "unique_callers": s.unique_callers,
+                    "trend": s.trend,
+                }))
+                .collect::<Vec<_>>()
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // McpHandler trait
 // ---------------------------------------------------------------------------
@@ -153,6 +187,13 @@ pub struct TransportManager {
     start_time: tokio::time::Instant,
     module_count: usize,
     metrics_exporter: Option<Arc<dyn MetricsExporter>>,
+    usage_exporter: Option<Arc<dyn UsageExporter>>,
+    /// Optional handler called when the transport detects a session
+    /// disconnect / cancellation notification. Used by
+    /// [`AsyncTaskBridge::cancel_session_tasks`] to forward cancellation
+    /// to any tasks launched from that session.
+    #[allow(clippy::type_complexity)]
+    cancel_handler: Option<Arc<dyn Fn(&str) + Send + Sync>>,
 }
 
 impl TransportManager {
@@ -162,6 +203,30 @@ impl TransportManager {
             start_time: tokio::time::Instant::now(),
             module_count: 0,
             metrics_exporter,
+            usage_exporter: None,
+            cancel_handler: None,
+        }
+    }
+
+    /// Install an optional usage exporter (surfaced at `/usage`).
+    pub fn set_usage_exporter(&mut self, exporter: Option<Arc<dyn UsageExporter>>) {
+        self.usage_exporter = exporter;
+    }
+
+    /// Install a cancellation handler invoked with the session id when the
+    /// transport observes a client disconnect or explicit cancel. The
+    /// handler typically forwards to
+    /// [`AsyncTaskBridge::cancel_session_tasks`].
+    #[allow(clippy::type_complexity)]
+    pub fn set_cancel_handler(&mut self, handler: Option<Arc<dyn Fn(&str) + Send + Sync>>) {
+        self.cancel_handler = handler;
+    }
+
+    /// Invoke the cancellation handler with the given session id.
+    /// No-op when no handler is installed.
+    pub fn notify_cancel(&self, session_id: &str) {
+        if let Some(h) = &self.cancel_handler {
+            h(session_id);
         }
     }
 
@@ -210,14 +275,27 @@ impl TransportManager {
         }
     }
 
-    /// Build an axum [`Router`] with `/health` and `/metrics` GET routes.
+    /// Build the usage response.
+    ///
+    /// Returns `Ok(body)` with JSON when a usage exporter is configured,
+    /// or `Err(())` otherwise.
+    fn build_usage_response(&self) -> Result<Value, ()> {
+        match &self.usage_exporter {
+            Some(exporter) => Ok(exporter.export_json()),
+            None => Err(()),
+        }
+    }
+
+    /// Build an axum [`Router`] with `/health`, `/metrics`, and `/usage` GET routes.
     ///
     /// The returned router uses `Arc<TransportManager>` as shared state.
+    /// `/usage` returns 404 when no `UsageExporter` is configured.
     pub fn health_metrics_router(self: &Arc<Self>) -> Router {
         let tm = Arc::clone(self);
         Router::new()
             .route("/health", get(health_handler))
             .route("/metrics", get(metrics_handler))
+            .route("/usage", get(usage_handler))
             .with_state(tm)
     }
 
@@ -492,6 +570,15 @@ async fn metrics_handler(
             body,
         )
             .into_response(),
+        Err(()) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn usage_handler(
+    axum::extract::State(tm): axum::extract::State<Arc<TransportManager>>,
+) -> axum::response::Response {
+    match tm.build_usage_response() {
+        Ok(body) => (StatusCode::OK, axum::Json(body)).into_response(),
         Err(()) => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -1673,6 +1760,82 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn integration_usage_endpoint_404_without_exporter() {
+        let tm = Arc::new(TransportManager::new(None));
+        let handler: Arc<dyn McpHandler> = Arc::new(EchoHandler);
+        let app = tm.build_streamable_http_app(handler, None);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let client = test_client();
+        let resp = client
+            .request(
+                hyper::Request::builder()
+                    .uri(format!("http://{}/usage", addr))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn integration_usage_endpoint_200_with_exporter() {
+        struct TestUsage;
+        impl UsageExporter for TestUsage {
+            fn export_json(&self) -> Value {
+                serde_json::json!({"modules": [{"module_id": "a", "call_count": 1}]})
+            }
+        }
+        let mut tm = TransportManager::new(None);
+        let exporter: Arc<dyn UsageExporter> = Arc::new(TestUsage);
+        tm.set_usage_exporter(Some(exporter));
+        let tm = Arc::new(tm);
+        let handler: Arc<dyn McpHandler> = Arc::new(EchoHandler);
+        let app = tm.build_streamable_http_app(handler, None);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let client = test_client();
+        let resp = client
+            .request(
+                hyper::Request::builder()
+                    .uri(format!("http://{}/usage", addr))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = collect_body(resp.into_body()).await;
+        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        assert!(parsed.get("modules").is_some());
+        server.abort();
+    }
+
+    #[test]
+    fn cancel_handler_invocation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let counter = Arc::new(AtomicUsize::new(0));
+        let c = Arc::clone(&counter);
+        let mut tm = TransportManager::new(None);
+        tm.set_cancel_handler(Some(Arc::new(move |_sid: &str| {
+            c.fetch_add(1, Ordering::SeqCst);
+        })));
+        tm.notify_cancel("sess-1");
+        tm.notify_cancel("sess-2");
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

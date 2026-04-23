@@ -97,13 +97,35 @@ impl AnnotationMapper {
         if annotations.cacheable != defaults.cacheable {
             parts.push(format!("cacheable={}", annotations.cacheable));
         }
+        if annotations.cache_ttl != defaults.cache_ttl {
+            parts.push(format!("cache_ttl={}", annotations.cache_ttl));
+        }
+        if annotations.cache_key_fields != defaults.cache_key_fields {
+            if let Some(fields) = &annotations.cache_key_fields {
+                parts.push(format!("cache_key_fields=[{}]", fields.join(",")));
+            }
+        }
         if annotations.paginated != defaults.paginated {
             parts.push(format!("paginated={}", annotations.paginated));
         }
+        if annotations.pagination_style != defaults.pagination_style {
+            parts.push(format!("pagination_style={}", annotations.pagination_style));
+        }
 
-        // NOTE: F-041 annotation metadata passthrough (`mcp_` prefixed keys from
-        // `annotations.extra`) will be added here once apcore exposes the `extra`
-        // field on ModuleAnnotations.
+        // F-041 annotation metadata passthrough: surface any `mcp_` prefixed
+        // extension keys from `annotations.extra` verbatim. Keys are sorted so
+        // the rendered block is stable across runs. Values are formatted with
+        // `serde_json::Value::to_string` which handles scalars and JSON fragments
+        // identically.
+        let mut mcp_extras: Vec<(&String, &serde_json::Value)> = annotations
+            .extra
+            .iter()
+            .filter(|(k, _)| k.starts_with("mcp_"))
+            .collect();
+        mcp_extras.sort_by(|a, b| a.0.cmp(b.0));
+        for (k, v) in mcp_extras {
+            parts.push(format!("{}={}", k, v));
+        }
 
         if warnings.is_empty() && parts.is_empty() {
             return String::new();

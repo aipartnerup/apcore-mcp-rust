@@ -57,6 +57,16 @@ pub enum ErrorCode {
     ConfigEnvMapConflict,
     PipelineAbort,
     StepNotFound,
+    // New error codes introduced by apcore 0.19.0 (DECLARATIVE_CONFIG_SPEC §7.1
+    // and PROTOCOL_SPEC §5.3 / §5.15.2). Surfaced here for cross-SDK parity.
+    DependencyNotFound,
+    DependencyVersionMismatch,
+    TaskLimitExceeded,
+    VersionConstraintInvalid,
+    BindingSchemaInferenceFailed,
+    BindingSchemaModeConflict,
+    BindingStrictSchemaIncompatible,
+    BindingPolicyViolation,
 }
 
 /// Registry lifecycle events.
@@ -152,7 +162,7 @@ mod tests {
     fn error_code_count() {
         // Intentional guard: update this count when adding new error codes
         // to ensure the strum EnumIter derivation stays in sync.
-        assert_eq!(ErrorCode::iter().count(), 27);
+        assert_eq!(ErrorCode::iter().count(), 35);
     }
 
     #[test]
@@ -276,6 +286,14 @@ mod tests {
             "CONFIG_ENV_MAP_CONFLICT",
             "PIPELINE_ABORT",
             "STEP_NOT_FOUND",
+            "DEPENDENCY_NOT_FOUND",
+            "DEPENDENCY_VERSION_MISMATCH",
+            "TASK_LIMIT_EXCEEDED",
+            "VERSION_CONSTRAINT_INVALID",
+            "BINDING_SCHEMA_INFERENCE_FAILED",
+            "BINDING_SCHEMA_MODE_CONFLICT",
+            "BINDING_STRICT_SCHEMA_INCOMPATIBLE",
+            "BINDING_POLICY_VIOLATION",
         ];
         for code_str in &python_codes {
             let parsed: ErrorCode = code_str
