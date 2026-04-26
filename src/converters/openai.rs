@@ -1,5 +1,7 @@
 //! OpenAIConverter — converts apcore module descriptors to OpenAI function-calling format.
 
+use std::collections::HashMap;
+
 use apcore::module::ModuleAnnotations;
 use serde_json::Value;
 
@@ -71,6 +73,12 @@ impl OpenAIConverter {
         };
 
         let mut tools = Vec::new();
+        // [OC-3] Track normalized names so we can detect collisions.
+        // OpenAI function names must be unique post-normalization
+        // (dot→hyphen). E.g. `a.b` and `a-b` both normalize to `a-b`;
+        // without this guard we'd silently emit two tools with
+        // identical function.name, producing undefined OpenAI behavior.
+        let mut seen_names: HashMap<String, String> = HashMap::new();
         // Sort keys for deterministic output
         let mut module_ids: Vec<&String> = modules.keys().collect();
         module_ids.sort();
@@ -108,6 +116,23 @@ impl OpenAIConverter {
 
             let tool =
                 self.convert_descriptor(module_id, entry, description, embed_annotations, strict)?;
+            // Extract the function name from the tool envelope.
+            let tool_name = tool
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+                .to_string();
+            if let Some(existing) = seen_names.get(&tool_name) {
+                if existing != module_id {
+                    return Err(ConverterError::StrictMode(format!(
+                        "OpenAI function-name collision: module ids '{existing}' and \
+                         '{module_id}' both normalize to '{tool_name}'. OpenAI requires \
+                         unique function names; rename one of the modules to avoid the collision."
+                    )));
+                }
+            }
+            seen_names.insert(tool_name, module_id.clone());
             tools.push(tool);
         }
 
