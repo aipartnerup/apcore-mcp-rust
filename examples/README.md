@@ -115,3 +115,36 @@ registry = Registry(extensions_dir="./examples/extensions")
 registry.discover()
 serve(registry, transport="streamable-http", port=8000, explorer=True, allow_execute=True)
 ```
+
+---
+
+## Scenario coverage notes (cross-language)
+
+Python and TypeScript ship two additional example scenarios that the Rust
+crate does not yet provide:
+
+| Scenario | Python | TypeScript | Rust |
+|---|---|---|---|
+| `run` (default unified demo) | ✓ | ✓ | ✓ |
+| `extensions/` (filesystem-discovered modules) | ✓ | ✓ | ⚠ pending |
+| `binding_demo/` (`.binding.yaml`-driven, zero-code-intrusion modules) | ✓ | ✓ | ⚠ pending |
+
+The patterns are exercised by the `run` example above:
+
+- `examples/run/modules.rs` registers modules in-process — equivalent to
+  what `extensions/` would discover from a directory. The Rust apcore
+  Registry supports filesystem discovery via `Registry::discover_dir`;
+  a dedicated `extensions/` example would just narrow the launcher to
+  call `discover_dir` instead of inline registration.
+- `binding_demo/` requires `apcore-toolkit`'s `BindingLoader::load_binding_dir`
+  applied to a directory of `.binding.yaml` files. A Rust port is
+  tracked as a follow-up — the Rust `BindingLoader` API surface
+  (`apcore-toolkit = 0.5.0`) is available but not yet wired into a
+  full demo.
+
+Cross-reference: the equivalent Python examples live at
+`apcore-mcp-python/examples/extensions/` and
+`apcore-mcp-python/examples/binding_demo/`; TypeScript at
+`apcore-mcp-typescript/examples/extensions/` and
+`apcore-mcp-typescript/examples/binding_demo/`. A Rust port aiming for
+1:1 scenario parity should mirror those structures. [B-006, B-007]
