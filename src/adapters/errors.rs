@@ -419,7 +419,7 @@ impl ApcoreErrorFormatter for McpErrorFormatter {
 /// Register the MCP error formatter with apcore's ErrorFormatterRegistry.
 ///
 /// Safe to call multiple times — ignores duplicate registration.
-pub fn register_mcp_error_formatter() {
+pub fn register_mcp_formatter() {
     if !ErrorFormatterRegistry::is_registered("mcp") {
         let _ = ErrorFormatterRegistry::register("mcp", Box::new(McpErrorFormatter));
     }
@@ -688,9 +688,18 @@ mod tests {
     }
 
     #[test]
-    fn test_register_mcp_error_formatter_idempotent() {
-        register_mcp_error_formatter();
-        register_mcp_error_formatter(); // Should not panic
+    fn test_register_mcp_formatter_idempotent() {
+        register_mcp_formatter();
+        register_mcp_formatter(); // Should not panic
+    }
+
+    #[test]
+    fn test_register_mcp_formatter_naming_parity() {
+        // Regression for [A-001]: function must be named `register_mcp_formatter`
+        // (no `_error_` infix), matching the Python and TypeScript SDKs.
+        // This test references the canonical name; if the function is renamed
+        // back to `register_mcp_error_formatter`, this won't compile.
+        register_mcp_formatter();
     }
 
     // ---- camelCase output keys ----

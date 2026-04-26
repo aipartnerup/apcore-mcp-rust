@@ -43,7 +43,7 @@ impl AdapterError {
 pub use annotations::AnnotationMapper;
 pub use approval::ElicitationApprovalHandler;
 pub use errors::ErrorMapper;
-pub use errors::{register_mcp_error_formatter, McpErrorFormatter};
+pub use errors::{register_mcp_formatter, McpErrorFormatter};
 pub use id_normalizer::ModuleIDNormalizer;
 pub use schema::SchemaConverter;
 

@@ -47,7 +47,7 @@ pub use crate::server::server::{MCPServer, MCPServerConfig, RegistryOrExecutor, 
 pub use crate::server::transport::TransportManager;
 
 // ---- Re-exports: adapters ---------------------------------------------------
-pub use crate::adapters::register_mcp_error_formatter;
+pub use crate::adapters::register_mcp_formatter;
 pub use crate::adapters::AdapterError;
 pub use crate::adapters::AnnotationMapper;
 pub use crate::adapters::ElicitationApprovalHandler;

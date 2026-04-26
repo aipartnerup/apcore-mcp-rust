@@ -1205,7 +1205,7 @@ impl APCoreMCPBuilder {
 
         // Register MCP config namespace and error formatter (idempotent)
         crate::config::register_mcp_namespace();
-        crate::adapters::errors::register_mcp_error_formatter();
+        crate::adapters::errors::register_mcp_formatter();
 
         // F-040: Load pipeline strategy from YAML config if present.
         // The "mcp.pipeline" section in the Config Bus takes precedence over
