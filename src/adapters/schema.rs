@@ -85,24 +85,70 @@ impl SchemaConverter {
     /// Recursively inject `additionalProperties: false` on every object node
     /// that doesn't already have an explicit `additionalProperties` setting.
     /// Preserves user-set `additionalProperties: true` (or any other value).
+    ///
+    /// [SC-9] Walks ONLY a whitelist of subschema-bearing keys (mirrors
+    /// Python's `_SCHEMA_CHILD_*` sets and TS's recursion contract).
+    /// Pre-fix Rust descended into every map key — including `enum`,
+    /// `const`, `examples`, `default`, `required` — and could spuriously
+    /// inject `additionalProperties:false` on object-shaped values inside
+    /// those data leaves.
+    ///
+    /// [SC-18] Object-type detection accepts both `type: "object"` and
+    /// `type: ["object", "null"]` (nullable-object form). Pre-fix Rust
+    /// only matched the bare-string form; nullable-object schemas with
+    /// `properties` would also be incorrectly downgraded.
     fn inject_strict(node: &mut Value) {
-        match node {
-            Value::Object(map) => {
-                let is_object_type = map.get("type").and_then(|v| v.as_str()) == Some("object")
-                    || map.contains_key("properties");
-                if is_object_type && !map.contains_key("additionalProperties") {
-                    map.insert("additionalProperties".to_string(), json!(false));
+        // Subschema-bearing keys whose VALUES contain schemas (recurse into).
+        const SUBSCHEMA_DICT_KEYS: &[&str] =
+            &["properties", "patternProperties", "$defs", "definitions"];
+        // Keys whose value is a single nested schema.
+        const SUBSCHEMA_KEYS: &[&str] = &[
+            "items",
+            "additionalProperties",
+            "not",
+            "if",
+            "then",
+            "else",
+            "contains",
+        ];
+        // Keys whose value is a list of nested schemas.
+        const SUBSCHEMA_LIST_KEYS: &[&str] = &["oneOf", "anyOf", "allOf"];
+
+        // Strict-mode applies to schema objects only; arrays at the
+        // root level shouldn't be reached in well-formed JSON Schema.
+        if let Value::Object(map) = node {
+            // [SC-18] Detect object type with nullable form support.
+            let type_val = map.get("type");
+            let is_object_type = match type_val {
+                Some(Value::String(s)) => s == "object",
+                Some(Value::Array(arr)) => arr.iter().any(|v| v.as_str() == Some("object")),
+                None => map.contains_key("properties"),
+                _ => false,
+            };
+            if is_object_type && !map.contains_key("additionalProperties") {
+                map.insert("additionalProperties".to_string(), json!(false));
+            }
+            // [SC-9] Recurse only into whitelisted subschema slots.
+            // Skip enum, const, examples, default, required, type, etc.
+            for &key in SUBSCHEMA_DICT_KEYS {
+                if let Some(Value::Object(inner)) = map.get_mut(key) {
+                    for (_, v) in inner.iter_mut() {
+                        Self::inject_strict(v);
+                    }
                 }
-                for (_, v) in map.iter_mut() {
+            }
+            for &key in SUBSCHEMA_KEYS {
+                if let Some(v) = map.get_mut(key) {
                     Self::inject_strict(v);
                 }
             }
-            Value::Array(arr) => {
-                for v in arr.iter_mut() {
-                    Self::inject_strict(v);
+            for &key in SUBSCHEMA_LIST_KEYS {
+                if let Some(Value::Array(arr)) = map.get_mut(key) {
+                    for v in arr.iter_mut() {
+                        Self::inject_strict(v);
+                    }
                 }
             }
-            _ => {}
         }
     }
 
@@ -186,9 +232,24 @@ impl SchemaConverter {
         if let Some(map) = schema.as_object_mut() {
             if !map.contains_key("type") {
                 map.insert("type".to_string(), json!("object"));
+                return;
             }
-            if map.contains_key("properties") && map.get("type") != Some(&json!("object")) {
-                map.insert("type".to_string(), json!("object"));
+            // [SC-18] When `properties` is present but `type` is set to
+            // something non-object-shaped, force `type: "object"`.
+            // CRITICALLY: preserve `type: ["object", "null"]` and other
+            // list-form types that include "object" — pre-fix Rust did
+            // a strict-equality check against `json!("object")` which
+            // caused nullable-object schemas to be downgraded to bare
+            // object, losing the nullable signal.
+            if map.contains_key("properties") {
+                let already_object = match map.get("type") {
+                    Some(Value::String(s)) => s == "object",
+                    Some(Value::Array(arr)) => arr.iter().any(|v| v.as_str() == Some("object")),
+                    _ => false,
+                };
+                if !already_object {
+                    map.insert("type".to_string(), json!("object"));
+                }
             }
         }
     }
@@ -597,5 +658,77 @@ mod tests {
         let original = schema.clone();
         let _ = SchemaConverter::convert_input_schema(&schema).unwrap();
         assert_eq!(schema, original, "Original schema must not be mutated");
+    }
+
+    /// [SC-18] Regression: nullable-object schemas (`type: ["object",
+    /// "null"]`) must NOT be downgraded to bare `type: "object"` by
+    /// ensure_object_type. The list form is valid JSON Schema and signals
+    /// nullability; downgrading loses that signal.
+    #[test]
+    fn nullable_object_type_preserved() {
+        let schema = json!({
+            "type": ["object", "null"],
+            "properties": {
+                "name": {"type": "string"}
+            }
+        });
+        let result = SchemaConverter::convert_input_schema(&schema).unwrap();
+        // The type field must remain a list including "object" and "null".
+        let type_field = result.get("type").expect("type must be present");
+        match type_field {
+            Value::Array(arr) => {
+                let strs: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+                assert!(strs.contains(&"object"), "type must include 'object'");
+                assert!(strs.contains(&"null"), "type must include 'null'");
+            }
+            other => panic!("expected type to remain a list, got: {other:?}"),
+        }
+    }
+
+    /// [SC-9] Regression: strict-mode injection must NOT descend into
+    /// `enum`, `const`, `examples`, or `default` arrays/objects, even if
+    /// they happen to contain object-shaped values. Pre-fix Rust walked
+    /// every map key and would spuriously inject additionalProperties
+    /// into data leaves.
+    #[test]
+    fn strict_mode_does_not_descend_into_enum_const_examples() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "color": {
+                    "type": "object",
+                    // enum entries are object-shaped DATA, not subschemas.
+                    "enum": [
+                        {"properties": {"r": {"type": "number"}}},
+                        {"properties": {"g": {"type": "number"}}}
+                    ],
+                    // examples likewise are data, not subschemas.
+                    "examples": [
+                        {"properties": {"hex": "#fff"}}
+                    ]
+                }
+            }
+        });
+        let result = SchemaConverter::convert_input_schema(&schema).unwrap();
+        // The enum/examples entries should NOT have additionalProperties
+        // injected. Walk into them and assert.
+        let color = result
+            .get("properties")
+            .and_then(|p| p.get("color"))
+            .unwrap();
+        let enum_arr = color.get("enum").and_then(|v| v.as_array()).unwrap();
+        for entry in enum_arr {
+            assert!(
+                entry.get("additionalProperties").is_none(),
+                "strict must NOT inject into enum data leaves; got: {entry:?}"
+            );
+        }
+        let examples_arr = color.get("examples").and_then(|v| v.as_array()).unwrap();
+        for entry in examples_arr {
+            assert!(
+                entry.get("additionalProperties").is_none(),
+                "strict must NOT inject into examples data leaves; got: {entry:?}"
+            );
+        }
     }
 }
