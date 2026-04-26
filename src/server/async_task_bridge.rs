@@ -264,6 +264,9 @@ impl AsyncTaskBridge {
                 description:
                     "Submit a module for asynchronous execution via apcore's AsyncTaskManager."
                         .to_string(),
+                // Schema parity with Python+TS: additionalProperties:false
+                // closes the meta-tool input shape against unknown keys.
+                // [A-D-023]
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -271,7 +274,8 @@ impl AsyncTaskBridge {
                         "arguments": { "type": "object" },
                         "version_hint": { "type": "string" }
                     },
-                    "required": ["module_id"]
+                    "required": ["module_id"],
+                    "additionalProperties": false
                 }),
                 annotations: None,
                 meta: Some(json!({ "reserved": true })),
@@ -286,7 +290,8 @@ impl AsyncTaskBridge {
                     "properties": {
                         "task_id": { "type": "string" }
                     },
-                    "required": ["task_id"]
+                    "required": ["task_id"],
+                    "additionalProperties": false
                 }),
                 annotations: None,
                 meta: Some(json!({ "reserved": true })),
@@ -299,7 +304,8 @@ impl AsyncTaskBridge {
                     "properties": {
                         "task_id": { "type": "string" }
                     },
-                    "required": ["task_id"]
+                    "required": ["task_id"],
+                    "additionalProperties": false
                 }),
                 annotations: None,
                 meta: Some(json!({ "reserved": true })),
@@ -316,7 +322,8 @@ impl AsyncTaskBridge {
                             "type": "string",
                             "enum": ["pending", "running", "completed", "failed", "cancelled"]
                         }
-                    }
+                    },
+                    "additionalProperties": false
                 }),
                 annotations: None,
                 meta: Some(json!({ "reserved": true })),

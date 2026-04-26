@@ -686,11 +686,18 @@ impl ExecutionRouter {
         // Re-extract after building context (we moved them into CallExtra)
         let (progress_token, send_notification, _, _) = Self::extract_extra(extra);
 
-        // Pre-execution validation
+        // Pre-execution validation. catch_unwind guards against panics from
+        // third-party executor implementations (symmetric with validate_tool's
+        // panic-safety) — a buggy validator must not bring down handle_call.
+        // [A-D-029]
         if self.validate_inputs {
             if let Some(ref executor) = self.executor {
-                match executor.validate(tool_name, arguments, Some(&context_value)) {
-                    Some(validation) if !validation.valid => {
+                let validate_result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        executor.validate(tool_name, arguments, Some(&context_value))
+                    }));
+                match validate_result {
+                    Ok(Some(validation)) if !validation.valid => {
                         let detail = Self::format_validation_errors(&validation.errors);
                         return (
                             vec![ContentItem {
@@ -701,8 +708,18 @@ impl ExecutionRouter {
                             None,
                         );
                     }
-                    Some(_) => { /* valid, continue */ }
-                    None => { /* executor doesn't support validate, skip */ }
+                    Ok(Some(_)) => { /* valid, continue */ }
+                    Ok(None) => { /* executor doesn't support validate, skip */ }
+                    Err(_) => {
+                        return (
+                            vec![ContentItem {
+                                content_type: "text".into(),
+                                data: Value::String("Validation failed: validator panicked".into()),
+                            }],
+                            true,
+                            None,
+                        );
+                    }
                 }
             }
         }
@@ -781,11 +798,18 @@ impl ExecutionRouter {
         // Build per-call context
         let (context_value, _context_data, _apcore_ctx) = Self::build_context(&extra);
 
-        // Pre-execution validation
+        // Pre-execution validation. catch_unwind guards against panics from
+        // third-party executor implementations (symmetric with validate_tool's
+        // panic-safety) — a buggy validator must not bring down handle_call.
+        // [A-D-029]
         if self.validate_inputs {
             if let Some(ref executor) = self.executor {
-                match executor.validate(tool_name, arguments, Some(&context_value)) {
-                    Some(validation) if !validation.valid => {
+                let validate_result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        executor.validate(tool_name, arguments, Some(&context_value))
+                    }));
+                match validate_result {
+                    Ok(Some(validation)) if !validation.valid => {
                         let detail = Self::format_validation_errors(&validation.errors);
                         return (
                             vec![ContentItem {
@@ -796,8 +820,18 @@ impl ExecutionRouter {
                             None,
                         );
                     }
-                    Some(_) => { /* valid, continue */ }
-                    None => { /* executor doesn't support validate, skip */ }
+                    Ok(Some(_)) => { /* valid, continue */ }
+                    Ok(None) => { /* executor doesn't support validate, skip */ }
+                    Err(_) => {
+                        return (
+                            vec![ContentItem {
+                                content_type: "text".into(),
+                                data: Value::String("Validation failed: validator panicked".into()),
+                            }],
+                            true,
+                            None,
+                        );
+                    }
                 }
             }
         }

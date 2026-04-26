@@ -470,20 +470,27 @@ impl MCPServerFactory {
     /// Register `list_resources` and `read_resource` handlers for modules
     /// with documentation.
     ///
-    /// Iterates over the registry, collects modules that have descriptions
-    /// (used as documentation since `ModuleDescriptor` lacks a dedicated
-    /// `documentation` field), and registers handlers that expose them as
-    /// `docs://{module_id}` resources.
+    /// Iterates over the registry and exposes each module's
+    /// `descriptor.documentation` field (long-form text) as a
+    /// `docs://{module_id}` resource. Falls back to `description` when the
+    /// canonical `documentation` field is absent — preserves resource
+    /// availability while still preferring the dedicated field. Python and
+    /// TypeScript both use `descriptor.documentation`. [A-D-013]
     ///
     /// Since there is no Rust MCP SDK yet, handlers are stored as closures
     /// on the `MCPServer` struct.
     pub fn register_resource_handlers(&self, server: &mut MCPServer, registry: &Registry) {
-        // Build docs map: module_id -> description (as documentation)
+        // Build docs map: module_id -> documentation (preferred) or description (fallback)
         let mut docs_map: HashMap<String, String> = HashMap::new();
         for module_id in registry.list(None, None) {
-            let description = registry.describe(&module_id);
-            if description != "Module not found" && !description.is_empty() {
-                docs_map.insert(module_id.to_string(), description);
+            if let Some(descriptor) = registry.get_definition(&module_id) {
+                let doc_text = descriptor
+                    .documentation
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| descriptor.description.clone());
+                if !doc_text.is_empty() {
+                    docs_map.insert(module_id.to_string(), doc_text);
+                }
             }
         }
 
