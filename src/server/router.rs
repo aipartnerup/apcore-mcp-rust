@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio_stream::Stream;
 
 use apcore::trace_context::{TraceContext, TraceParent};
@@ -616,8 +616,16 @@ impl ExecutionRouter {
                     progress_token_val,
                     session_key.as_deref(),
                 );
+                // Wrap into the spec envelope `{task_id, status: "pending"}`
+                // rather than serialising the full TaskInfo. [A-D-007] —
+                // matches what the meta-tool path does in handle_submit.
                 return Self::meta_tool_response(
-                    res.map(|info| serde_json::to_value(info).unwrap_or(Value::Null)),
+                    res.map(|info| {
+                        json!({
+                            "task_id": info.task_id,
+                            "status": "pending",
+                        })
+                    }),
                     &apcore_ctx,
                 );
             }
@@ -3485,9 +3493,72 @@ mod tests {
         Arc::new(apcore::executor::Executor::new(registry, config))
     }
 
+    /// Build an executor with a single async-hinted module pre-registered.
+    /// Used by router tests that exercise the bridge's submit path post
+    /// [A-D-008] (which now rejects non-async module ids).
+    fn make_apcore_executor_with_async(module_id: &str) -> Arc<apcore::executor::Executor> {
+        #[derive(Debug)]
+        struct AsyncDummyModule;
+
+        #[async_trait::async_trait]
+        impl apcore::module::Module for AsyncDummyModule {
+            fn input_schema(&self) -> Value {
+                json!({"type": "object", "properties": {}})
+            }
+            fn output_schema(&self) -> Value {
+                json!({"type": "object"})
+            }
+            fn description(&self) -> &str {
+                "async dummy"
+            }
+            async fn execute(
+                &self,
+                _inputs: Value,
+                _ctx: &apcore::context::Context<Value>,
+            ) -> Result<Value, apcore::errors::ModuleError> {
+                Ok(json!({}))
+            }
+        }
+
+        let registry = Arc::new(apcore::registry::registry::Registry::default());
+        let config = Arc::new(apcore::config::Config::default());
+
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("async".to_string(), json!(true));
+        let descriptor = apcore::registry::ModuleDescriptor {
+            module_id: module_id.to_string(),
+            name: None,
+            description: "async dummy".to_string(),
+            documentation: None,
+            input_schema: json!({"type": "object", "properties": {}}),
+            output_schema: json!({"type": "object"}),
+            version: "1.0.0".to_string(),
+            tags: vec![],
+            annotations: Some(apcore::module::ModuleAnnotations::default()),
+            examples: vec![],
+            metadata,
+            display: None,
+            sunset_date: None,
+            dependencies: vec![],
+            enabled: true,
+        };
+
+        registry
+            .register(module_id, Box::new(AsyncDummyModule), descriptor)
+            .expect("register async module");
+
+        Arc::new(apcore::executor::Executor::new(registry, config))
+    }
+
     #[tokio::test]
     async fn meta_tool_submit_routes_via_async_bridge() {
-        let bridge = Arc::new(AsyncTaskBridge::new(make_apcore_executor()));
+        // Use an executor with `some.module` pre-registered as async-hinted
+        // so the bridge's [A-D-008] guard (ASYNC_MODULE_NOT_ASYNC) does not
+        // reject the submit. The bridge requires the target module to be
+        // registered AND async-hinted to accept __apcore_task_submit.
+        let bridge = Arc::new(AsyncTaskBridge::new(make_apcore_executor_with_async(
+            "some.module",
+        )));
         let router = ExecutionRouter::new(Box::new(MockExecutor), false, None)
             .with_async_bridge(bridge, std::collections::HashSet::new());
         let (content, is_error, trace_id) = router
@@ -3499,16 +3570,23 @@ mod tests {
             .await;
         assert!(!is_error);
         assert!(trace_id.is_some());
-        // Content must include the task_id envelope.
+        // Content must be the spec envelope: {task_id, status: "pending"}.
+        // [A-D-007] regression — pre-fix Rust serialised the full TaskInfo
+        // which would have included module_id; the spec envelope omits it.
         let text = match &content[0].data {
             Value::String(s) => s.clone(),
             _ => panic!("expected string content"),
         };
         let parsed: Value = serde_json::from_str(&text).unwrap();
-        assert!(parsed.get("task_id").is_some());
+        assert!(parsed.get("task_id").is_some(), "task_id required");
         assert_eq!(
-            parsed.get("module_id").and_then(|v| v.as_str()),
-            Some("some.module")
+            parsed.get("status").and_then(|v| v.as_str()),
+            Some("pending"),
+            "status must be 'pending' per spec; got: {parsed:?}"
+        );
+        assert!(
+            parsed.get("module_id").is_none(),
+            "envelope must NOT contain module_id (spec shape); got: {parsed:?}"
         );
     }
 

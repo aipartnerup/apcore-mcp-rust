@@ -54,6 +54,10 @@ pub const DEFAULT_MAX_TASKS: usize = 1000;
 pub struct AsyncTaskBridge {
     /// Shared apcore async task manager.
     manager: Arc<AsyncTaskManager>,
+    /// Reference to the executor, retained so that `handle_submit` can
+    /// look up the module descriptor via `executor.registry()` to enforce
+    /// the spec's `ASYNC_MODULE_NOT_ASYNC` rejection rule. [A-D-008]
+    executor: Arc<ApcoreExecutor>,
     /// Cached output schemas (per module id) used for result redaction.
     output_schemas: HashMap<String, Value>,
     /// Map of task_id → progressToken recorded at submit time for
@@ -78,7 +82,12 @@ impl AsyncTaskBridge {
         max_tasks: usize,
     ) -> Self {
         Self {
-            manager: Arc::new(AsyncTaskManager::new(executor, max_concurrent, max_tasks)),
+            manager: Arc::new(AsyncTaskManager::new(
+                Arc::clone(&executor),
+                max_concurrent,
+                max_tasks,
+            )),
+            executor,
             output_schemas: HashMap::new(),
             progress_tokens: Arc::new(Mutex::new(HashMap::new())),
             session_tasks: Arc::new(Mutex::new(HashMap::new())),
@@ -355,9 +364,31 @@ impl AsyncTaskBridge {
                     "__apcore_task_submit requires 'module_id'",
                 )
             })?;
+        // Spec rule: __apcore_task_submit against a non-async module returns
+        // ASYNC_MODULE_NOT_ASYNC. Python enforces this; TS+Rust were
+        // previously skipping the check and silently wrapping sync-only
+        // modules as async tasks. [A-D-008]
+        let registry = self.executor.registry();
+        if !Self::is_async_registered(registry, module_id) {
+            return Err(apcore::errors::ModuleError::new(
+                apcore::errors::ErrorCode::GeneralInvalidInput,
+                format!(
+                    "ASYNC_MODULE_NOT_ASYNC: module '{module_id}' is not async-hinted; \
+                     use regular tools/call instead of __apcore_task_submit"
+                ),
+            ));
+        }
         let inputs = arguments.get("arguments").cloned().unwrap_or(json!({}));
         let info = self.submit(module_id, inputs, identity, progress_token, session_key)?;
-        Ok(serde_json::to_value(info).unwrap_or(Value::Null))
+        // Return the spec-mandated envelope `{task_id, status: "pending"}` —
+        // not the full TaskInfo. Python and TypeScript both return exactly
+        // this shape; serializing TaskInfo would leak module_id/timestamps
+        // and may report a non-pending status if the task already started
+        // between submit() and get_status(). [A-D-007]
+        Ok(json!({
+            "task_id": info.task_id,
+            "status": "pending",
+        }))
     }
 
     fn handle_status(&self, arguments: &Value) -> Result<Value, apcore::errors::ModuleError> {
@@ -428,11 +459,70 @@ mod tests {
     use apcore::executor::Executor;
     use apcore::module::ModuleAnnotations;
     use apcore::registry::registry::Registry;
+    use apcore::registry::ModuleDescriptor;
     use std::sync::Arc;
 
     fn make_executor() -> Arc<Executor> {
         let registry = Arc::new(Registry::default());
         let config = Arc::new(apcore::config::Config::default());
+        Arc::new(Executor::new(registry, config))
+    }
+
+    /// Build an executor with an async-hinted module pre-registered under
+    /// the given module_id. Used by tests that exercise the spec-compliant
+    /// `handle_submit` path post-A-D-008 (which now rejects non-async
+    /// module ids with ASYNC_MODULE_NOT_ASYNC).
+    fn make_executor_with_async(module_id: &str) -> Arc<Executor> {
+        #[derive(Debug)]
+        struct AsyncDummyModule;
+
+        #[async_trait::async_trait]
+        impl apcore::module::Module for AsyncDummyModule {
+            fn input_schema(&self) -> Value {
+                json!({"type": "object", "properties": {}})
+            }
+            fn output_schema(&self) -> Value {
+                json!({"type": "object"})
+            }
+            fn description(&self) -> &str {
+                "async dummy"
+            }
+            async fn execute(
+                &self,
+                _inputs: Value,
+                _ctx: &Context<Value>,
+            ) -> Result<Value, apcore::errors::ModuleError> {
+                Ok(json!({}))
+            }
+        }
+
+        let registry = Arc::new(Registry::default());
+        let config = Arc::new(apcore::config::Config::default());
+
+        let mut metadata = HashMap::new();
+        metadata.insert("async".to_string(), json!(true));
+        let descriptor = ModuleDescriptor {
+            module_id: module_id.to_string(),
+            name: None,
+            description: "async dummy".to_string(),
+            documentation: None,
+            input_schema: json!({"type": "object", "properties": {}}),
+            output_schema: json!({"type": "object"}),
+            version: "1.0.0".to_string(),
+            tags: vec![],
+            annotations: Some(ModuleAnnotations::default()),
+            examples: vec![],
+            metadata,
+            display: None,
+            sunset_date: None,
+            dependencies: vec![],
+            enabled: true,
+        };
+
+        registry
+            .register(module_id, Box::new(AsyncDummyModule), descriptor)
+            .expect("register async module");
+
         Arc::new(Executor::new(registry, config))
     }
 
@@ -508,7 +598,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_meta_tool_submit_then_status() {
-        let bridge = AsyncTaskBridge::new(make_executor());
+        let bridge = AsyncTaskBridge::new(make_executor_with_async("some.module"));
         let submit_result = bridge
             .handle_meta_tool(
                 META_TOOL_SUBMIT,
@@ -524,6 +614,24 @@ mod tests {
             .and_then(|v| v.as_str())
             .expect("task_id must be present");
 
+        // Regression for [A-D-007]: submit envelope must be exactly
+        // {task_id, status: "pending"} — not the full TaskInfo.
+        assert_eq!(
+            submit_result.get("status").and_then(|v| v.as_str()),
+            Some("pending"),
+            "submit envelope must report status=pending; got: {submit_result:?}"
+        );
+        // Pre-fix Rust serialised the full TaskInfo which leaks
+        // module_id, submitted_at, etc. Confirm those are absent.
+        assert!(
+            submit_result.get("module_id").is_none(),
+            "submit envelope must NOT contain module_id; got: {submit_result:?}"
+        );
+        assert!(
+            submit_result.get("submitted_at").is_none(),
+            "submit envelope must NOT contain submitted_at; got: {submit_result:?}"
+        );
+
         let status_result = bridge
             .handle_meta_tool(
                 META_TOOL_STATUS,
@@ -537,6 +645,38 @@ mod tests {
         assert_eq!(
             status_result.get("task_id").and_then(|v| v.as_str()),
             Some(task_id)
+        );
+    }
+
+    /// Regression test for [A-D-008].
+    ///
+    /// `__apcore_task_submit` against a module that is NOT async-hinted
+    /// must return ASYNC_MODULE_NOT_ASYNC (per spec). Pre-fix Rust skipped
+    /// this check and silently wrapped sync-only modules as async tasks.
+    #[tokio::test]
+    async fn handle_submit_rejects_non_async_module_with_async_module_not_async() {
+        // Executor with NO async-hinted modules registered. The default
+        // `make_executor()` already produces an empty registry, so we
+        // expect the bridge to reject any module_id (since no module is
+        // async-hinted, every module triggers the rule).
+        let bridge = AsyncTaskBridge::new(make_executor());
+
+        let result = bridge.handle_meta_tool(
+            META_TOOL_SUBMIT,
+            &json!({"module_id": "non_async.mod", "arguments": {}}),
+            None,
+            None,
+            None,
+        );
+
+        // handle_meta_tool returns Some(Err(...)) for known meta-tool with
+        // an error.
+        let inner = result.expect("meta-tool must be routed");
+        let err = inner.expect_err("submit on non-async module must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ASYNC_MODULE_NOT_ASYNC"),
+            "error must surface ASYNC_MODULE_NOT_ASYNC code, got: {msg}"
         );
     }
 
