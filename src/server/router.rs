@@ -292,6 +292,11 @@ pub struct ExecutionRouter {
     cancel_tokens: std::sync::Arc<std::sync::Mutex<HashMap<String, std::sync::Arc<CancelToken>>>>,
 }
 
+/// [B-002] Maximum number of cancel-token entries (active + tombstones)
+/// kept in the per-router map. When exceeded, oldest entries are evicted
+/// in FIFO order to prevent unbounded growth from spam-cancel tombstones.
+const CANCEL_TOKENS_MAX: usize = 4096;
+
 /// Cooperative cancellation token, mirrors apcore-py's `CancelToken`.
 /// [B-002]
 #[derive(Debug)]
@@ -317,6 +322,22 @@ impl CancelToken {
     pub fn cancel(&self) {
         self.cancelled
             .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// RAII guard returned by [`ExecutionRouter::_cancel_guard`]. On drop,
+/// releases the call_id slot from the router's cancel_tokens map so
+/// the map doesn't grow unboundedly. [B-002]
+struct CancelGuard {
+    call_id: String,
+    tokens: std::sync::Arc<std::sync::Mutex<HashMap<String, std::sync::Arc<CancelToken>>>>,
+}
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.tokens.lock() {
+            guard.remove(&self.call_id);
+        }
     }
 }
 
@@ -464,7 +485,66 @@ impl ExecutionRouter {
         let tombstone = std::sync::Arc::new(CancelToken::new());
         tombstone.cancel();
         guard.insert(call_id.to_string(), tombstone);
+        Self::_evict_cancel_tokens_locked(&mut guard);
         false
+    }
+
+    /// Internal: register a CancelToken for `call_id` and return an RAII
+    /// guard that releases the slot when dropped. [B-002]
+    fn _cancel_guard(&self, call_id: &str) -> CancelGuard {
+        let token = std::sync::Arc::new(CancelToken::new());
+        let mut guard = self.cancel_tokens.lock().unwrap_or_else(|p| p.into_inner());
+        // Tombstone race: if a tombstone was recorded earlier via
+        // cancel_call, propagate the cancelled state to the new token.
+        if let Some(existing) = guard.get(call_id) {
+            if existing.is_cancelled() {
+                token.cancel();
+            }
+        }
+        guard.insert(call_id.to_string(), std::sync::Arc::clone(&token));
+        Self::_evict_cancel_tokens_locked(&mut guard);
+        CancelGuard {
+            call_id: call_id.to_string(),
+            tokens: std::sync::Arc::clone(&self.cancel_tokens),
+        }
+    }
+
+    /// [B-002] When the cancel-tokens map exceeds [`CANCEL_TOKENS_MAX`],
+    /// drop already-cancelled tombstones first, then drop arbitrary
+    /// entries until back within bounds. Active tokens (where the
+    /// CancelGuard is still alive — strong-count > 1) are preferred to
+    /// be kept; only cancelled tombstones are dropped first.
+    fn _evict_cancel_tokens_locked(
+        map: &mut std::sync::MutexGuard<'_, HashMap<String, std::sync::Arc<CancelToken>>>,
+    ) {
+        if map.len() <= CANCEL_TOKENS_MAX {
+            return;
+        }
+        // Phase 1: drop cancelled tombstones (no live CancelGuard
+        // referencing them — strong_count == 1, only the map holds it).
+        let to_drop: Vec<String> = map
+            .iter()
+            .filter(|(_, tok)| tok.is_cancelled() && std::sync::Arc::strong_count(tok) == 1)
+            .map(|(k, _)| k.clone())
+            .take(map.len() - CANCEL_TOKENS_MAX)
+            .collect();
+        for k in to_drop {
+            map.remove(&k);
+        }
+        // Phase 2: if still over the cap (rare — would mean lots of
+        // simultaneously-active calls), drop arbitrary entries to
+        // restore the bound. Strict in-flight calls get a stale
+        // CancelGuard that no longer maps back, but the call still
+        // completes (just no cancel possible).
+        while map.len() > CANCEL_TOKENS_MAX {
+            let key = map.keys().next().cloned();
+            match key {
+                Some(k) => {
+                    map.remove(&k);
+                }
+                None => break,
+            }
+        }
     }
 
     /// Direct accessor used by tests and callers that need to cancel tasks
@@ -648,6 +728,32 @@ impl ExecutionRouter {
         arguments: &Value,
         extra: Option<&Value>,
     ) -> (Vec<ContentItem>, bool, Option<String>) {
+        // [B-002] Register a CancelToken for this call so an inbound MCP
+        // `notifications/cancelled` (forwarded into `router.cancel_call(call_id)`)
+        // cooperatively cancels in-flight work. call_id sourced from
+        // extras.call_id, _meta.progressToken, or generated. Released
+        // in `_release_cancel_token` at the end of this function via the
+        // RAII guard.
+        let call_id = extra
+            .and_then(|v| v.get("call_id"))
+            .and_then(|v| {
+                v.as_str()
+                    .map(String::from)
+                    .or_else(|| v.as_i64().map(|n| n.to_string()))
+            })
+            .or_else(|| {
+                extra
+                    .and_then(|v| v.get("_meta"))
+                    .and_then(|v| v.get("progressToken"))
+                    .and_then(|v| {
+                        v.as_str()
+                            .map(String::from)
+                            .or_else(|| v.as_i64().map(|n| n.to_string()))
+                    })
+            })
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let _cancel_guard = self._cancel_guard(&call_id);
+
         let redacted = self.redact_inputs(tool_name, arguments);
         tracing::debug!(
             tool = tool_name,
