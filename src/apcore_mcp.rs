@@ -338,19 +338,20 @@ impl APCoreMCP {
         &self.executor
     }
 
-    /// Create and log a RegistryListener if dynamic mode is enabled.
+    /// Create a RegistryListener if dynamic mode is enabled, leaving the
+    /// caller responsible for invoking `listener.start(registry, factory)`
+    /// once the `Arc<Registry>` and `Arc<MCPServerFactory>` are both
+    /// available downstream of the build pipeline.
     ///
-    /// RegistryListener::start requires `&mut Registry`. Currently the
-    /// registry is behind Arc, so we cannot obtain `&mut`. The listener
-    /// is created and will be fully functional once apcore's Registry
-    /// supports interior-mutable callback registration (`Registry::on`
-    /// taking `&self`).
+    /// `RegistryListener::start` now accepts `Arc<Registry>` (post-A-D-002),
+    /// so wiring no longer requires `&mut Registry`; this function returns
+    /// the unstarted listener so the build site can decide ordering.
     fn maybe_start_listener(dynamic: bool) -> Option<RegistryListener> {
         if dynamic {
             let listener = RegistryListener::new();
             tracing::info!(
-                "Dynamic mode: RegistryListener created (pending registry \
-                 callback API that accepts &self instead of &mut self)"
+                "Dynamic mode: RegistryListener created — caller must invoke \
+                 listener.start(registry, factory) to begin processing events"
             );
             Some(listener)
         } else {

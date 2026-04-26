@@ -5,8 +5,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
-use apcore::registry::{ModuleDescriptor, Registry};
+use apcore::registry::Registry;
 
+use crate::constants::RegistryEvent;
 use crate::server::factory::MCPServerFactory;
 use crate::server::types::Tool;
 
@@ -33,9 +34,16 @@ impl RegistryListener {
 
     /// Start listening for registry change events.
     ///
-    /// Registers callbacks on the registry for "register" and "unregister" events.
+    /// Registers callbacks on the registry for `register` and `unregister` events.
     /// Idempotent: calling multiple times is safe (second call is a no-op).
-    pub fn start(&self, registry: &mut Registry, factory: Arc<MCPServerFactory>) {
+    ///
+    /// Takes `Arc<Registry>` so that the register callback can fetch the
+    /// canonical descriptor via `registry.get_definition(module_id)` rather
+    /// than synthesizing one from the bare `Module` trait — synthesis would
+    /// drop tags, version, metadata, display, sunset_date, and dependencies
+    /// recorded at registration time. This matches the Python and TypeScript
+    /// SDKs which both use the registry as the single source of truth.
+    pub fn start(&self, registry: Arc<Registry>, factory: Arc<MCPServerFactory>) {
         // compare_exchange ensures only one activation succeeds
         if self
             .active
@@ -50,37 +58,31 @@ impl RegistryListener {
             let tools = Arc::clone(&self.tools);
             let active = Arc::clone(&self.active);
             let factory = Arc::clone(&factory);
+            let registry_for_cb = Arc::clone(&registry);
             registry.on(
-                "register",
+                &RegistryEvent::Register.to_string(),
                 Box::new(
                     move |module_id: &str, _module: &dyn apcore::module::Module| {
                         if !active.load(Ordering::SeqCst) {
                             return;
                         }
-                        // Build a tool from the module's own schema info.
-                        // The callback receives the module reference directly, so we
-                        // construct a descriptor from it.
-                        let description = _module.description().to_string();
-                        let input_schema = _module.input_schema();
-                        let output_schema = _module.output_schema();
-
-                        let descriptor = ModuleDescriptor {
-                            module_id: module_id.to_string(),
-                            name: None,
-                            description: description.clone(),
-                            documentation: None,
-                            input_schema,
-                            output_schema,
-                            version: "1.0.0".to_string(),
-                            tags: vec![],
-                            annotations: Some(apcore::module::ModuleAnnotations::default()),
-                            examples: vec![],
-                            metadata: std::collections::HashMap::new(),
-                            display: None,
-                            sunset_date: None,
-                            dependencies: vec![],
-                            enabled: true,
+                        // Fetch the canonical descriptor from the registry — do
+                        // NOT synthesize from the bare Module trait. The
+                        // descriptor stored at registration time carries
+                        // version/tags/metadata/display/sunset_date/dependencies
+                        // that the trait does not expose. [A-D-002]
+                        let descriptor = match registry_for_cb.get_definition(module_id) {
+                            Some(d) => d,
+                            None => {
+                                tracing::warn!(
+                                    "RegistryListener: get_definition returned None for '{}'; \
+                                     skipping tool build",
+                                    module_id
+                                );
+                                return;
+                            }
                         };
+                        let description = descriptor.description.clone();
 
                         match factory.build_tool(&descriptor, &description, None) {
                             Ok(tool) => {
@@ -103,7 +105,7 @@ impl RegistryListener {
             let tools = Arc::clone(&self.tools);
             let active = Arc::clone(&self.active);
             registry.on(
-                "unregister",
+                &RegistryEvent::Unregister.to_string(),
                 Box::new(
                     move |module_id: &str, _module: &dyn apcore::module::Module| {
                         if !active.load(Ordering::SeqCst) {
@@ -354,13 +356,13 @@ mod tests {
     fn start_is_idempotent() {
         let listener = RegistryListener::new();
         let factory = Arc::new(MCPServerFactory::new());
-        let mut registry = Registry::new();
+        let registry = Arc::new(Registry::new());
 
-        listener.start(&mut registry, Arc::clone(&factory));
+        listener.start(Arc::clone(&registry), Arc::clone(&factory));
         assert!(listener.is_active());
 
         // Second call should be a no-op (no panic, still active)
-        listener.start(&mut registry, factory);
+        listener.start(registry, factory);
         assert!(listener.is_active());
     }
 
@@ -368,9 +370,9 @@ mod tests {
     fn stop_deactivates_listener() {
         let listener = RegistryListener::new();
         let factory = Arc::new(MCPServerFactory::new());
-        let mut registry = Registry::new();
+        let registry = Arc::new(Registry::new());
 
-        listener.start(&mut registry, factory);
+        listener.start(registry, factory);
         assert!(listener.is_active());
 
         listener.stop();
@@ -384,8 +386,8 @@ mod tests {
         assert!(!listener.is_active());
 
         let factory = Arc::new(MCPServerFactory::new());
-        let mut registry = Registry::new();
-        listener.start(&mut registry, factory);
+        let registry = Arc::new(Registry::new());
+        listener.start(registry, factory);
         listener.stop();
         listener.stop(); // second stop is no-op
         assert!(!listener.is_active());
@@ -426,9 +428,9 @@ mod tests {
     fn start_registers_callbacks_that_respond_to_events() {
         let listener = RegistryListener::new();
         let factory = Arc::new(MCPServerFactory::new());
-        let mut registry = Registry::new();
+        let registry = Arc::new(Registry::new());
 
-        listener.start(&mut registry, factory);
+        listener.start(Arc::clone(&registry), factory);
 
         let descriptor = apcore::registry::ModuleDescriptor {
             module_id: "dummy_a".to_string(),
@@ -461,9 +463,9 @@ mod tests {
     fn stopped_listener_ignores_register_events() {
         let listener = RegistryListener::new();
         let factory = Arc::new(MCPServerFactory::new());
-        let mut registry = Registry::new();
+        let registry = Arc::new(Registry::new());
 
-        listener.start(&mut registry, Arc::clone(&factory));
+        listener.start(Arc::clone(&registry), Arc::clone(&factory));
         listener.stop();
 
         let descriptor = apcore::registry::ModuleDescriptor {
@@ -496,9 +498,9 @@ mod tests {
     fn unregister_event_removes_tool() {
         let listener = RegistryListener::new();
         let factory = Arc::new(MCPServerFactory::new());
-        let mut registry = Registry::new();
+        let registry = Arc::new(Registry::new());
 
-        listener.start(&mut registry, Arc::clone(&factory));
+        listener.start(Arc::clone(&registry), Arc::clone(&factory));
 
         let descriptor = apcore::registry::ModuleDescriptor {
             module_id: "dummy_c".to_string(),
@@ -525,5 +527,67 @@ mod tests {
 
         registry.unregister("dummy_c").unwrap();
         assert!(listener.tools().is_empty());
+    }
+
+    /// Regression test for [A-D-002].
+    ///
+    /// The listener must fetch the canonical descriptor via
+    /// `registry.get_definition(module_id)` rather than synthesizing one
+    /// from the bare `Module` trait. The pre-fix behavior built a
+    /// descriptor inline with a hard-coded `version: "1.0.0"`, empty tags,
+    /// and `description: Module::description()` — losing every metadata
+    /// field the registry stored.
+    ///
+    /// We assert this by registering with a description distinct from
+    /// the trait's `description()`. If synthesis regressed, the tool's
+    /// description would equal the trait string; the canonical fetch
+    /// returns the registered descriptor's description.
+    #[test]
+    fn register_callback_uses_canonical_descriptor_not_synthesized() {
+        define_dummy_module!(RichDummy, "trait-level description (should NOT be used)");
+
+        let listener = RegistryListener::new();
+        let factory = Arc::new(MCPServerFactory::new());
+        let registry = Arc::new(Registry::new());
+
+        listener.start(Arc::clone(&registry), factory);
+
+        let descriptor = apcore::registry::ModuleDescriptor {
+            module_id: "rich_dummy".to_string(),
+            name: None,
+            description: "canonical descriptor description (must be used)".to_string(),
+            documentation: None,
+            input_schema: json!({"type": "object", "properties": {}}),
+            output_schema: json!({"type": "object"}),
+            version: "2.5.0".to_string(),
+            tags: vec!["analytics".to_string(), "experimental".to_string()],
+            annotations: Some(apcore::module::ModuleAnnotations::default()),
+            examples: vec![],
+            metadata: std::collections::HashMap::new(),
+            display: None,
+            sunset_date: None,
+            dependencies: vec![],
+            enabled: true,
+        };
+
+        registry
+            .register("rich_dummy", Box::new(RichDummy), descriptor)
+            .unwrap();
+
+        let tools = listener.tools();
+        let tool = tools
+            .get("rich_dummy")
+            .expect("tool should be registered via canonical descriptor path");
+
+        // The tool's description must derive from the canonical descriptor
+        // (`canonical descriptor description ...`), not the trait method
+        // (`trait-level description ...`).
+        assert!(
+            tool.description
+                .contains("canonical descriptor description"),
+            "tool description should derive from registry's stored descriptor, \
+             not Module::description() trait method. Got: {:?}",
+            tool.description
+        );
     }
 }
