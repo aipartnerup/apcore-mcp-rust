@@ -87,11 +87,25 @@ impl ApprovalHandler for ElicitationApprovalHandler {
             request.arguments,
         );
 
-        let result = match elicit(message, None).await {
-            Some(r) => r,
-            None => {
+        // [AH-3] Catch panics from the elicit callback so a buggy
+        // implementation can't bring down the approval task. Mirrors
+        // Python (try/except) and TypeScript (try/catch) which both
+        // degrade to `rejected("Elicitation request failed")` on error.
+        // futures::FutureExt::catch_unwind handles async panics across
+        // .await points; std::panic::catch_unwind cannot.
+        use futures::FutureExt;
+        let result_outcome = std::panic::AssertUnwindSafe(elicit(message, None))
+            .catch_unwind()
+            .await;
+        let result = match result_outcome {
+            Ok(Some(r)) => r,
+            Ok(None) => {
                 tracing::debug!("elicitation returned no response");
                 return Ok(rejected("Elicitation returned no response"));
+            }
+            Err(_panic) => {
+                tracing::debug!("elicit callback panicked");
+                return Ok(rejected("Elicitation request failed"));
             }
         };
 
