@@ -136,6 +136,18 @@ impl AsyncTaskBridge {
         false
     }
 
+    /// Look up `module_id` against this bridge's executor's registry and
+    /// return whether the descriptor is async-hinted.
+    ///
+    /// Dynamic counterpart to the static `async_module_ids` set the
+    /// router previously used: callers that mutate the registry at
+    /// runtime (dynamic-tool-registration via `RegistryListener`) will
+    /// have their newly-registered async modules routed through the
+    /// bridge without the router needing a refresh. [A-D-031]
+    pub fn is_async_module_registered_self(&self, module_id: &str) -> bool {
+        Self::is_async_registered(self.executor.registry(), module_id)
+    }
+
     /// Check whether an async hint applies to a module registered in the
     /// given apcore registry.
     pub fn is_async_registered(registry: &Registry, module_id: &str) -> bool {
@@ -410,9 +422,17 @@ impl AsyncTaskBridge {
             })?;
         match self.get_status(task_id) {
             Some(info) => Ok(serde_json::to_value(info).unwrap_or(Value::Null)),
+            // Spec uses ASYNC_TASK_NOT_FOUND for missing task ids, not
+            // ModuleNotFound (which means "module by that id not in
+            // registry"). Encode the spec code in the message so the
+            // ErrorMapper / clients can recognize it. apcore does not
+            // expose a dedicated ErrorCode variant for this; using
+            // GeneralInvalidInput keeps the error class within apcore's
+            // error hierarchy without introducing a cross-repo change.
+            // [A-D-017]
             None => Err(apcore::errors::ModuleError::new(
-                apcore::errors::ErrorCode::ModuleNotFound,
-                format!("task not found: {task_id}"),
+                apcore::errors::ErrorCode::GeneralInvalidInput,
+                format!("ASYNC_TASK_NOT_FOUND: task not found: {task_id}"),
             )),
         }
     }

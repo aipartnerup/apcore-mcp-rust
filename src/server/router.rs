@@ -98,11 +98,16 @@ pub trait Executor: Send + Sync {
 
     /// Return a stream of result chunks for a module, or `None` if
     /// the executor does not support streaming.
+    ///
+    /// `version_hint` optionally pins the streamed module's version
+    /// for parity with `call_async`. Pre-fix Rust dropped the hint on
+    /// the streaming path; Python and TS both forward it. [A-D-030]
     fn stream(
         &self,
         _module_id: &str,
         _inputs: &Value,
         _context: Option<&Value>,
+        _version_hint: Option<&str>,
     ) -> Option<StreamResult> {
         None
     }
@@ -660,7 +665,15 @@ impl ExecutionRouter {
             ) {
                 return Self::meta_tool_response(result, &apcore_ctx);
             }
-            if self.async_module_ids.contains(tool_name) {
+            // Async-hint dispatch: dynamic descriptor lookup against the
+            // bridge's own registry (catches modules registered AFTER
+            // router construction — the static `async_module_ids` set
+            // was stale on registry mutations). The static set is still
+            // honored as an explicit override for tests that wire a
+            // bridge without a real registry. [A-D-031]
+            let is_async_hinted = self.async_module_ids.contains(tool_name)
+                || bridge.is_async_module_registered_self(tool_name);
+            if is_async_hinted {
                 let res = bridge.submit(
                     tool_name,
                     arguments.clone(),
@@ -728,8 +741,15 @@ impl ExecutionRouter {
         // handle_stream will fall back to non-streaming if executor doesn't
         // support streaming.
         if let (Some(ref pt), Some(ref sn)) = (progress_token, send_notification) {
-            self.handle_stream(tool_name, arguments, pt, sn, Some(&context_value))
-                .await
+            self.handle_stream(
+                tool_name,
+                arguments,
+                pt,
+                sn,
+                Some(&context_value),
+                version_hint.as_deref(),
+            )
+            .await
         } else {
             self.handle_call_async_with_hint(
                 tool_name,
@@ -840,7 +860,7 @@ impl ExecutionRouter {
         // handle_stream will fall back to non-streaming if executor doesn't
         // support streaming.
         if let (Some(ref pt), Some(ref sn)) = (extra.progress_token, extra.send_notification) {
-            self.handle_stream(tool_name, arguments, pt, sn, Some(&context_value))
+            self.handle_stream(tool_name, arguments, pt, sn, Some(&context_value), None)
                 .await
         } else {
             self.handle_call_async(tool_name, arguments, Some(&context_value))
@@ -1238,6 +1258,7 @@ impl ExecutionRouter {
         progress_token: &ProgressToken,
         send_notification: &SendNotificationFn,
         context: Option<&Value>,
+        version_hint: Option<&str>,
     ) -> (Vec<ContentItem>, bool, Option<String>) {
         use tokio_stream::StreamExt;
 
@@ -1255,11 +1276,13 @@ impl ExecutionRouter {
             }
         };
 
-        let stream = match executor.stream(tool_name, arguments, context) {
+        let stream = match executor.stream(tool_name, arguments, context, version_hint) {
             Some(s) => s,
             None => {
                 // Fallback to non-streaming
-                return self.handle_call_async(tool_name, arguments, context).await;
+                return self
+                    .handle_call_async_with_hint(tool_name, arguments, context, version_hint)
+                    .await;
             }
         };
 
@@ -1379,6 +1402,7 @@ mod tests {
             _module_id: &str,
             _inputs: &Value,
             _context: Option<&Value>,
+            _version_hint: Option<&str>,
         ) -> Option<StreamResult> {
             let chunks = vec![Ok(json!({"a": 1})), Ok(json!({"b": 2}))];
             Some(Box::pin(tokio_stream::iter(chunks)))
@@ -1425,14 +1449,14 @@ mod tests {
     #[test]
     fn test_mock_executor_stream_none() {
         let executor = MockExecutor;
-        let stream = executor.stream("test.module", &json!({}), None);
+        let stream = executor.stream("test.module", &json!({}), None, None);
         assert!(stream.is_none());
     }
 
     #[test]
     fn test_mock_executor_stream_some() {
         let executor = FullMockExecutor;
-        let stream = executor.stream("test.module", &json!({}), None);
+        let stream = executor.stream("test.module", &json!({}), None, None);
         assert!(stream.is_some());
     }
 
@@ -1441,7 +1465,9 @@ mod tests {
         use tokio_stream::StreamExt;
 
         let executor = FullMockExecutor;
-        let mut stream = executor.stream("test.module", &json!({}), None).unwrap();
+        let mut stream = executor
+            .stream("test.module", &json!({}), None, None)
+            .unwrap();
 
         let chunk1 = stream.next().await.unwrap().unwrap();
         assert_eq!(chunk1, json!({"a": 1}));
@@ -2379,6 +2405,7 @@ mod tests {
             _module_id: &str,
             _inputs: &Value,
             _context: Option<&Value>,
+            _version_hint: Option<&str>,
         ) -> Option<StreamResult> {
             // We need to clone the data for the stream
             let chunks: Vec<Result<Value, ExecutorError>> = self
@@ -2428,7 +2455,7 @@ mod tests {
         let router = ExecutionRouter::new(Box::new(executor), false, None);
         let token = ProgressToken::String("tok-1".into());
         let (content, is_error, _) = router
-            .handle_stream("mod", &json!({}), &token, &sn, None)
+            .handle_stream("mod", &json!({}), &token, &sn, None, None)
             .await;
         assert!(!is_error);
         let text = content[0].data.as_str().unwrap();
@@ -2452,7 +2479,7 @@ mod tests {
         let router = ExecutionRouter::new(Box::new(executor), false, None);
         let token = ProgressToken::String("tok".into());
         let (content, is_error, _) = router
-            .handle_stream("mod", &json!({}), &token, &sn, None)
+            .handle_stream("mod", &json!({}), &token, &sn, None, None)
             .await;
         assert!(!is_error);
         let text = content[0].data.as_str().unwrap();
@@ -2472,7 +2499,7 @@ mod tests {
         let router = ExecutionRouter::new(Box::new(executor), false, None);
         let token = ProgressToken::String("tok".into());
         let (content, is_error, _) = router
-            .handle_stream("mod", &json!({}), &token, &sn, None)
+            .handle_stream("mod", &json!({}), &token, &sn, None, None)
             .await;
         assert!(!is_error);
         let text = content[0].data.as_str().unwrap();
@@ -2492,7 +2519,7 @@ mod tests {
         let router = ExecutionRouter::new(Box::new(executor), false, None);
         let token = ProgressToken::String("my-token".into());
         router
-            .handle_stream("mod", &json!({}), &token, &sn, None)
+            .handle_stream("mod", &json!({}), &token, &sn, None, None)
             .await;
 
         let notifications = captured.lock().unwrap();
@@ -2516,7 +2543,7 @@ mod tests {
         let router = ExecutionRouter::new(Box::new(executor), false, None);
         let token = ProgressToken::String("str-tok".into());
         router
-            .handle_stream("mod", &json!({}), &token, &sn, None)
+            .handle_stream("mod", &json!({}), &token, &sn, None, None)
             .await;
 
         let notifications = captured.lock().unwrap();
@@ -2532,7 +2559,7 @@ mod tests {
         let router = ExecutionRouter::new(Box::new(executor), false, None);
         let token = ProgressToken::Integer(99);
         router
-            .handle_stream("mod", &json!({}), &token, &sn, None)
+            .handle_stream("mod", &json!({}), &token, &sn, None, None)
             .await;
 
         let notifications = captured.lock().unwrap();
@@ -2548,7 +2575,7 @@ mod tests {
         let router = ExecutionRouter::new(Box::new(executor), false, None);
         let token = ProgressToken::String("tok".into());
         let (content, is_error, _) = router
-            .handle_stream("mod", &json!({}), &token, &sn, None)
+            .handle_stream("mod", &json!({}), &token, &sn, None, None)
             .await;
         assert!(!is_error);
         let text = content[0].data.as_str().unwrap();
@@ -2574,7 +2601,7 @@ mod tests {
         let router = ExecutionRouter::new(Box::new(executor), false, None);
         let token = ProgressToken::String("tok".into());
         let (content, is_error, _) = router
-            .handle_stream("mod", &json!({}), &token, &sn, None)
+            .handle_stream("mod", &json!({}), &token, &sn, None, None)
             .await;
         assert!(is_error);
         let text = content[0].data.as_str().unwrap();
@@ -2594,7 +2621,7 @@ mod tests {
         let router = ExecutionRouter::new(Box::new(executor), false, None);
         let token = ProgressToken::String("tok".into());
         let (_, is_error, _) = router
-            .handle_stream("mod", &json!({}), &token, &sn, None)
+            .handle_stream("mod", &json!({}), &token, &sn, None, None)
             .await;
         assert!(is_error);
     }
@@ -2612,7 +2639,7 @@ mod tests {
         let router = ExecutionRouter::new(Box::new(executor), false, Some(formatter));
         let token = ProgressToken::String("tok".into());
         let (content, is_error, _) = router
-            .handle_stream("mod", &json!({}), &token, &sn, None)
+            .handle_stream("mod", &json!({}), &token, &sn, None, None)
             .await;
         assert!(!is_error);
         let text = content[0].data.as_str().unwrap();
@@ -2629,7 +2656,7 @@ mod tests {
         let token = ProgressToken::String("tok".into());
         let ctx = json!({"trace_id": "trace-xyz"});
         let (_, is_error, trace_id) = router
-            .handle_stream("mod", &json!({}), &token, &sn, Some(&ctx))
+            .handle_stream("mod", &json!({}), &token, &sn, Some(&ctx), None)
             .await;
         assert!(!is_error);
         assert_eq!(trace_id, Some("trace-xyz".to_string()));
@@ -2641,7 +2668,7 @@ mod tests {
         let router = ExecutionRouter::new(Box::new(NonStreamingExecutor), false, None);
         let token = ProgressToken::String("tok".into());
         let (content, is_error, _) = router
-            .handle_stream("mod", &json!({}), &token, &sn, None)
+            .handle_stream("mod", &json!({}), &token, &sn, None, None)
             .await;
         assert!(!is_error);
         let text = content[0].data.as_str().unwrap();
@@ -3094,6 +3121,7 @@ mod tests {
             _module_id: &str,
             _inputs: &Value,
             _context: Option<&Value>,
+            _version_hint: Option<&str>,
         ) -> Option<StreamResult> {
             let chunks = self.stream_chunks.lock().unwrap().take()?;
             let cloned: Vec<Result<Value, ExecutorError>> = chunks
