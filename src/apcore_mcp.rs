@@ -412,7 +412,9 @@ impl APCoreMCP {
             .map(|t| t.iter().map(|s| s.as_str()).collect());
         let tags_slice: Option<&[&str]> = tags_refs.as_deref();
         let prefix = self.config.prefix.as_deref();
-        let tools = factory.build_tools(self.reg(), tags_slice, prefix);
+        let tools = factory
+            .build_tools(self.reg(), tags_slice, prefix)
+            .map_err(|e| APCoreMCPError::ServerError(e.to_string()))?;
 
         // Build output schema map for output redaction.
         let output_schema_map: std::collections::HashMap<String, Value> = {

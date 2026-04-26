@@ -137,6 +137,14 @@ pub enum FactoryError {
     ResourceNotFound(String),
     #[error("Unsupported URI scheme: {0}")]
     UnsupportedScheme(String),
+    /// A user module's id collides with the reserved `__apcore_` namespace
+    /// owned by the AsyncTaskBridge meta-tools. This is a fatal startup
+    /// configuration error — Python and TypeScript both raise/throw on
+    /// this case and crash the server. [A-D-010]
+    #[error(
+        "Reserved module id: '{0}' (the '__apcore_' prefix is owned by the async task bridge)"
+    )]
+    ReservedPrefix(String),
     #[error("{0}")]
     Other(String),
 }
