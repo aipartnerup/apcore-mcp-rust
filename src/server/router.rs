@@ -62,6 +62,21 @@ pub struct ValidationResult {
     pub valid: bool,
     /// Field-level errors (empty when `valid` is true).
     pub errors: Vec<ValidationError>,
+    /// Whether this module requires human approval before execution.
+    /// Surfaces from the apcore preflight gate so AI agents calling
+    /// `validate_tool` can decide whether to surface the approval flow
+    /// before invoking. [A-D-005]
+    pub requires_approval: bool,
+}
+
+impl Default for ValidationResult {
+    fn default() -> Self {
+        Self {
+            valid: true,
+            errors: Vec::new(),
+            requires_approval: false,
+        }
+    }
 }
 
 /// Abstraction over the apcore execution pipeline.
@@ -115,6 +130,18 @@ pub trait Executor: Send + Sync {
         _context: Option<&Value>,
         _version_hint: Option<&str>,
     ) -> Option<Result<(Value, Value), ExecutorError>> {
+        None
+    }
+
+    /// Return the descriptor-default version hint for `module_id`, if any.
+    ///
+    /// Used by [`ExecutionRouter::handle_call`] as the lowest-priority
+    /// source in the spec's 3-source `version_hint` cascade (after
+    /// `extras.version_hint` and `_meta.apcore.version`). [A-D-006]
+    ///
+    /// Default impl returns `None`. Real apcore-backed executors should
+    /// override to return `descriptor.metadata.version_hint`.
+    fn version_hint_default(&self, _module_id: &str) -> Option<String> {
         None
     }
 }
@@ -476,10 +503,13 @@ impl ExecutionRouter {
                         })
                     })
                     .collect();
+                // Propagate the executor's requires_approval flag so AI
+                // agents querying validate_tool before invoking can decide
+                // whether to surface the approval flow. [A-D-005]
                 serde_json::json!({
                     "valid": validation.valid,
                     "checks": checks,
-                    "requires_approval": false
+                    "requires_approval": validation.requires_approval,
                 })
             }
             Ok(None) => {
@@ -565,13 +595,35 @@ impl ExecutionRouter {
         // Extract streaming helpers and identity from extra
         let (progress_token, send_notification, session, identity) = Self::extract_extra(extra);
 
-        // Extract optional version_hint from `_meta.apcore.version` in the
-        // MCP call metadata.
-        let version_hint: Option<String> = extra
-            .and_then(|v| v.get("apcore"))
-            .and_then(|v| v.get("version"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        // Resolve version_hint via the spec's 3-source cascade: [A-D-006]
+        //   1. extras.version_hint  (SDK caller-supplied, highest priority)
+        //   2. extras._meta.apcore.version  (MCP client-supplied)
+        //   3. registry.get_definition(tool_name).metadata.version_hint
+        //      (descriptor default, lowest)
+        // Pre-fix Rust read only source #2.
+        let version_hint: Option<String> = {
+            // Source #1: extras.version_hint (snake_case) or .versionHint (camelCase)
+            let from_extras = extra
+                .and_then(|v| v.get("version_hint").or_else(|| v.get("versionHint")))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            // Source #2: extras._meta.apcore.version
+            let from_meta = || {
+                extra
+                    .and_then(|v| v.get("apcore"))
+                    .and_then(|v| v.get("version"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            };
+            // Source #3: executor.version_hint_default(module_id) — proxies
+            // descriptor.metadata.version_hint via the Executor trait.
+            let from_descriptor = || {
+                self.executor
+                    .as_ref()
+                    .and_then(|exec| exec.version_hint_default(tool_name))
+            };
+            from_extras.or_else(from_meta).or_else(from_descriptor)
+        };
 
         // Parse W3C traceparent from `_meta.traceparent` (if present).
         let trace_parent = Self::extract_traceparent(extra);
@@ -1185,6 +1237,14 @@ impl ExecutionRouter {
         loop {
             match stream.next().await {
                 Some(Ok(chunk)) => {
+                    // Per-chunk redaction MUST happen before the chunk is
+                    // serialized into the progress notification — otherwise
+                    // x-sensitive credentials emitted mid-stream leak to
+                    // the MCP client even though the final accumulated
+                    // value is later redacted. Mirrors Python's
+                    // _handle_stream invariant. [A-D-003]
+                    let safe_chunk = self.redact_output(tool_name, &chunk);
+
                     // Send progress notification
                     let notification = serde_json::json!({
                         "method": "notifications/progress",
@@ -1192,13 +1252,18 @@ impl ExecutionRouter {
                             "progressToken": progress_token_to_value(progress_token),
                             "progress": chunk_index + 1,
                             "total": null,
-                            "message": serde_json::to_string(&chunk).unwrap_or_default(),
+                            "message": serde_json::to_string(&safe_chunk).unwrap_or_default(),
                         }
                     });
                     if let Err(e) = send_notification(notification).await {
                         tracing::debug!("Failed to send progress notification: {e}");
                     }
 
+                    // Accumulate the original (un-redacted) chunk so the
+                    // final result still has full fidelity for redaction
+                    // at the response boundary; redaction is reapplied
+                    // there. The mid-stream notification is the leak
+                    // vector this fix closes.
                     accumulated = deep_merge(&accumulated, &chunk, 0);
                     chunk_index += 1;
                 }
@@ -1300,11 +1365,13 @@ mod tests {
                         message: "field is not allowed".to_string(),
                         errors: vec![],
                     }],
+                    requires_approval: false,
                 })
             } else {
                 Some(ValidationResult {
                     valid: true,
                     errors: vec![],
+                    requires_approval: false,
                 })
             }
         }
@@ -3212,6 +3279,7 @@ mod tests {
             .with_validate_result(ValidationResult {
                 valid: true,
                 errors: vec![],
+                requires_approval: false,
             })
             .with_call_result(Ok(json!({"result": "success"})));
         let router = ExecutionRouter::new(Box::new(executor), true, None);
@@ -3232,6 +3300,7 @@ mod tests {
                     message: "is not a valid email".to_string(),
                     errors: vec![],
                 }],
+                requires_approval: false,
             })
             .with_call_result(Ok(json!({"should": "not reach"})));
         let router = ExecutionRouter::new(Box::new(executor), true, None);
@@ -3253,6 +3322,7 @@ mod tests {
                     message: "bad".to_string(),
                     errors: vec![],
                 }],
+                requires_approval: false,
             })
             .with_call_result(Ok(json!({"executed": true})));
         let router = ExecutionRouter::new(Box::new(executor), false, None);
@@ -3623,5 +3693,51 @@ mod tests {
             )
             .await;
         assert!(is_error, "reserved module id must produce an error");
+    }
+
+    /// Regression test for [A-D-005].
+    ///
+    /// `validate_tool` must propagate `requires_approval` from the
+    /// executor's preflight result. Pre-fix Rust hard-coded
+    /// `requires_approval: false` in all branches; AI agents querying
+    /// validate_tool to decide whether to surface the approval flow would
+    /// always see `false` and skip the flow even for approval-gated
+    /// modules.
+    #[tokio::test]
+    async fn validate_tool_propagates_requires_approval() {
+        // Executor that reports requires_approval=true on preflight.
+        struct ApprovalGatedExecutor;
+        #[async_trait]
+        impl Executor for ApprovalGatedExecutor {
+            async fn call_async(
+                &self,
+                _module_id: &str,
+                _inputs: &Value,
+                _context: Option<&Value>,
+                _version_hint: Option<&str>,
+            ) -> Result<Value, ExecutorError> {
+                Ok(json!({}))
+            }
+            fn validate(
+                &self,
+                _module_id: &str,
+                _inputs: &Value,
+                _context: Option<&Value>,
+            ) -> Option<ValidationResult> {
+                Some(ValidationResult {
+                    valid: true,
+                    errors: vec![],
+                    requires_approval: true,
+                })
+            }
+        }
+
+        let router = ExecutionRouter::new(Box::new(ApprovalGatedExecutor), false, None);
+        let result = router.validate_tool("gated.module", &json!({})).await;
+        assert_eq!(
+            result.get("requires_approval").and_then(|v| v.as_bool()),
+            Some(true),
+            "validate_tool must surface executor's requires_approval flag; got: {result:?}"
+        );
     }
 }

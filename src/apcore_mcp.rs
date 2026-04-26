@@ -281,6 +281,16 @@ impl crate::server::router::Executor for ApcoreExecutorAdapter {
             }),
         })
     }
+
+    /// Look up the descriptor-default `version_hint` for the spec's
+    /// 3-source cascade. [A-D-006]
+    fn version_hint_default(&self, module_id: &str) -> Option<String> {
+        self.inner
+            .registry()
+            .get_definition(module_id)
+            .and_then(|desc| desc.metadata.get("version_hint").cloned())
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+    }
 }
 
 // ---- APCoreMCP struct -------------------------------------------------------
