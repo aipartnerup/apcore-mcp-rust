@@ -218,6 +218,30 @@ impl MCPServerFactory {
         description: &str,
         name_override: Option<&str>,
     ) -> Result<Tool, Box<dyn std::error::Error>> {
+        self.build_tool_with_registry(descriptor, description, name_override, None)
+    }
+
+    /// `build_tool` variant that, in a future apcore release, will be able
+    /// to prefer `registry.export_schema_strict(name, true)` for the
+    /// input schema (Strict Schema Sourcing per `mcp-server-factory.md`).
+    ///
+    /// **Status (apcore 0.19.0):** the `Registry::export_schema_strict`
+    /// method has been added to `apcore-rust` HEAD but has not yet shipped
+    /// in a released version. While the dep stays at `apcore = "0.19"`,
+    /// this variant always falls through to the local `SchemaConverter`,
+    /// matching the per-SDK status documented in
+    /// `mcp-server-factory.md` "Strict Schema Sourcing" → Rust row.
+    ///
+    /// When apcore 0.20+ ships, the body of this method will switch to
+    /// `registry.export_schema_strict(&descriptor.module_id, true)` and
+    /// drop the local-only path. [A-D-012]
+    pub fn build_tool_with_registry(
+        &self,
+        descriptor: &ModuleDescriptor,
+        description: &str,
+        name_override: Option<&str>,
+        _registry: Option<&Registry>,
+    ) -> Result<Tool, Box<dyn std::error::Error>> {
         // Reject reserved __apcore_ prefix at the symbol boundary, not just
         // the bulk path. Direct callers (extensions, plugins, tests) would
         // otherwise produce a poisoned Tool that shadows the async-task
@@ -229,7 +253,10 @@ impl MCPServerFactory {
             ));
         }
 
-        // Convert input schema
+        // [A-D-012] Strict Schema Sourcing: pending apcore 0.20 release
+        // for `Registry::export_schema_strict`. For now, always falls
+        // through to the local SchemaConverter (matches documented Rust
+        // row of the per-SDK status table in mcp-server-factory.md).
         let input_schema = SchemaConverter::convert_input_schema(&descriptor.input_schema)?;
 
         // Map annotations
@@ -352,7 +379,14 @@ impl MCPServerFactory {
                 None => description,
             };
 
-            match self.build_tool(&descriptor, &description, name_override) {
+            // [A-D-012] Pass the registry through so the strict-schema
+            // sourcing path can prefer registry.export_schema_strict(true).
+            match self.build_tool_with_registry(
+                &descriptor,
+                &description,
+                name_override,
+                Some(registry),
+            ) {
                 Ok(tool) => tools.push(tool),
                 Err(e) => {
                     // Reserved-prefix is fatal (matched at the loop top with
