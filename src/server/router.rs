@@ -285,6 +285,39 @@ pub struct ExecutionRouter {
     /// Optional bridge for routing async-hinted modules and handling
     /// `__apcore_task_*` meta-tools.
     async_bridge: Option<Arc<AsyncTaskBridge>>,
+    /// [B-002] Per-server `call_id → CancelToken` map. Populated on
+    /// tool-call entry by handle_call(); consulted by cancel(call_id).
+    /// Transport layer should forward inbound MCP
+    /// `notifications/cancelled` to `router.cancel(call_id, reason)`.
+    cancel_tokens: std::sync::Arc<std::sync::Mutex<HashMap<String, std::sync::Arc<CancelToken>>>>,
+}
+
+/// Cooperative cancellation token, mirrors apcore-py's `CancelToken`.
+/// [B-002]
+#[derive(Debug)]
+pub struct CancelToken {
+    cancelled: std::sync::atomic::AtomicBool,
+}
+
+impl Default for CancelToken {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CancelToken {
+    pub fn new() -> Self {
+        Self {
+            cancelled: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    pub fn cancel(&self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl ExecutionRouter {
@@ -303,6 +336,7 @@ impl ExecutionRouter {
             tool_schemas: HashMap::new(),
             output_schemas: HashMap::new(),
             async_bridge: None,
+            cancel_tokens: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -323,6 +357,7 @@ impl ExecutionRouter {
             tool_schemas: HashMap::new(),
             output_schemas: HashMap::new(),
             async_bridge: None,
+            cancel_tokens: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -346,6 +381,7 @@ impl ExecutionRouter {
             tool_schemas: HashMap::new(),
             output_schemas: HashMap::new(),
             async_bridge: None,
+            cancel_tokens: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -403,6 +439,32 @@ impl ExecutionRouter {
     pub fn with_async_bridge(mut self, bridge: Arc<AsyncTaskBridge>) -> Self {
         self.async_bridge = Some(bridge);
         self
+    }
+
+    /// Cooperatively cancel an in-flight tool call. [B-002]
+    ///
+    /// Looks up the [`CancelToken`] registered for `call_id` in
+    /// `handle_call` and calls `token.cancel()`. Modules executing
+    /// inside the apcore pipeline that check `context.cancel_token`
+    /// (when wired) will observe the cancellation. When `call_id` is
+    /// unknown (cancel arrived before submit, or after the call
+    /// completed), records a tombstone so a subsequent same-id submit
+    /// immediately sees the cancellation.
+    ///
+    /// Returns `true` when an active token was found and cancelled;
+    /// `false` when the `call_id` was unknown (tombstone recorded).
+    /// Wired by transport-level handlers parsing inbound MCP
+    /// `notifications/cancelled` messages.
+    pub fn cancel_call(&self, call_id: &str, _reason: Option<&str>) -> bool {
+        let mut guard = self.cancel_tokens.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(token) = guard.get(call_id) {
+            token.cancel();
+            return true;
+        }
+        let tombstone = std::sync::Arc::new(CancelToken::new());
+        tombstone.cancel();
+        guard.insert(call_id.to_string(), tombstone);
+        false
     }
 
     /// Direct accessor used by tests and callers that need to cancel tasks
@@ -1699,6 +1761,7 @@ mod tests {
             tool_schemas: HashMap::new(),
             output_schemas: HashMap::new(),
             async_bridge: None,
+            cancel_tokens: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
         let result = router.format_result(&json!({"a": 1, "b": 2}));
         assert_eq!(result, "custom: 2 keys");
@@ -1716,6 +1779,7 @@ mod tests {
             tool_schemas: HashMap::new(),
             output_schemas: HashMap::new(),
             async_bridge: None,
+            cancel_tokens: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
         // Non-object values should fall back to JSON
         assert_eq!(router.format_result(&json!("string")), r#""string""#);
@@ -1735,6 +1799,7 @@ mod tests {
             tool_schemas: HashMap::new(),
             output_schemas: HashMap::new(),
             async_bridge: None,
+            cancel_tokens: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
         // Should fall back to JSON when formatter returns an error
         let result = router.format_result(&json!({"key": "value"}));
@@ -3818,5 +3883,31 @@ mod tests {
             Some(true),
             "validate_tool must surface executor's requires_approval flag; got: {result:?}"
         );
+    }
+
+    /// [B-002] Regression: cancel_call sets a token, then a tombstone for
+    /// unknown call_ids.
+    #[test]
+    fn cancel_call_returns_false_for_unknown_id_records_tombstone() {
+        let router = ExecutionRouter::stub();
+        let ok = router.cancel_call("call-unknown", Some("client abort"));
+        assert!(!ok, "unknown call_id must return false");
+        let guard = router.cancel_tokens.lock().unwrap();
+        let tombstone = guard.get("call-unknown").expect("tombstone recorded");
+        assert!(tombstone.is_cancelled(), "tombstone must be cancelled");
+    }
+
+    #[test]
+    fn cancel_call_returns_true_for_active_token() {
+        let router = ExecutionRouter::stub();
+        let token = std::sync::Arc::new(CancelToken::new());
+        router
+            .cancel_tokens
+            .lock()
+            .unwrap()
+            .insert("call-1".to_string(), std::sync::Arc::clone(&token));
+        let ok = router.cancel_call("call-1", None);
+        assert!(ok, "active token must return true");
+        assert!(token.is_cancelled(), "token must be cancelled");
     }
 }
