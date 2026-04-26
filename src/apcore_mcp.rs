@@ -440,14 +440,12 @@ impl APCoreMCP {
             map
         };
 
-        // Classify async-hinted modules (metadata.async / annotations.extra.mcp_async).
+        // [A-D-031] Async-hinted classification is now done dynamically by
+        // the bridge at call time (`bridge.is_async_module_registered_self`),
+        // so we no longer pre-populate a static `async_ids` set. The
+        // pre-fix set was frozen at startup and stale on registry
+        // mutations.
         use crate::server::async_task_bridge::AsyncTaskBridge;
-        let mut async_ids = std::collections::HashSet::new();
-        for module_id in self.reg().list(tags_slice, prefix) {
-            if AsyncTaskBridge::is_async_registered(self.reg(), &module_id) {
-                async_ids.insert(module_id);
-            }
-        }
 
         // Build an AsyncTaskBridge backed by the same executor.
         let bridge = Arc::new(
@@ -470,7 +468,7 @@ impl APCoreMCP {
                 .with_redact_output(self.config.redact_output)
                 .with_trace(self.config.trace)
                 .with_output_schemas(output_schema_map)
-                .with_async_bridge(Arc::clone(&bridge), async_ids),
+                .with_async_bridge(Arc::clone(&bridge)),
         );
 
         // Register handlers

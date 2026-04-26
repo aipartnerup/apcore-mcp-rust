@@ -285,9 +285,6 @@ pub struct ExecutionRouter {
     /// Optional bridge for routing async-hinted modules and handling
     /// `__apcore_task_*` meta-tools.
     async_bridge: Option<Arc<AsyncTaskBridge>>,
-    /// Set of module ids classified as async (routed through the
-    /// [`AsyncTaskBridge`] rather than the normal executor path).
-    async_module_ids: std::collections::HashSet<String>,
 }
 
 impl ExecutionRouter {
@@ -306,7 +303,6 @@ impl ExecutionRouter {
             tool_schemas: HashMap::new(),
             output_schemas: HashMap::new(),
             async_bridge: None,
-            async_module_ids: std::collections::HashSet::new(),
         }
     }
 
@@ -327,7 +323,6 @@ impl ExecutionRouter {
             tool_schemas: HashMap::new(),
             output_schemas: HashMap::new(),
             async_bridge: None,
-            async_module_ids: std::collections::HashSet::new(),
         }
     }
 
@@ -351,7 +346,6 @@ impl ExecutionRouter {
             tool_schemas: HashMap::new(),
             output_schemas: HashMap::new(),
             async_bridge: None,
-            async_module_ids: std::collections::HashSet::new(),
         }
     }
 
@@ -399,13 +393,15 @@ impl ExecutionRouter {
     /// Attach an [`AsyncTaskBridge`] so the router can route async-hinted
     /// modules through `AsyncTaskManager::submit` and service the reserved
     /// `__apcore_task_*` meta-tools.
-    pub fn with_async_bridge(
-        mut self,
-        bridge: Arc<AsyncTaskBridge>,
-        async_ids: std::collections::HashSet<String>,
-    ) -> Self {
+    /// Wire an [`AsyncTaskBridge`] into the router for F-043 dispatch.
+    ///
+    /// Async-hinted module classification is performed dynamically at
+    /// call time via `bridge.is_async_module_registered_self(tool_name)`,
+    /// so newly-registered async modules (post-construction) are routed
+    /// correctly. The pre-fix static `async_module_ids` set was stale on
+    /// registry mutations and has been dropped. [A-D-031]
+    pub fn with_async_bridge(mut self, bridge: Arc<AsyncTaskBridge>) -> Self {
         self.async_bridge = Some(bridge);
-        self.async_module_ids = async_ids;
         self
     }
 
@@ -666,14 +662,11 @@ impl ExecutionRouter {
                 return Self::meta_tool_response(result, &apcore_ctx);
             }
             // Async-hint dispatch: dynamic descriptor lookup against the
-            // bridge's own registry (catches modules registered AFTER
-            // router construction — the static `async_module_ids` set
-            // was stale on registry mutations). The static set is still
-            // honored as an explicit override for tests that wire a
-            // bridge without a real registry. [A-D-031]
-            let is_async_hinted = self.async_module_ids.contains(tool_name)
-                || bridge.is_async_module_registered_self(tool_name);
-            if is_async_hinted {
+            // bridge's own registry. Catches modules registered AFTER
+            // router construction (RegistryListener-driven dynamic-tool
+            // registration) — the pre-fix static `async_module_ids` set
+            // was frozen at startup and stale on mutations. [A-D-031]
+            if bridge.is_async_module_registered_self(tool_name) {
                 let res = bridge.submit(
                     tool_name,
                     arguments.clone(),
@@ -1206,11 +1199,21 @@ impl ExecutionRouter {
             );
         }
 
-        match executor
-            .call_async(tool_name, arguments, context, version_hint)
-            .await
-        {
-            Ok(result) => {
+        // Symmetric panic-safety with validate_tool / handle_call's
+        // pre-execution validate guard. A panicking third-party executor
+        // impl must NOT bring down the call; convert to an is_error result.
+        // Uses futures::FutureExt::catch_unwind to catch panics across
+        // .await points — std::panic::catch_unwind cannot catch async
+        // panics on its own. [A-D-029]
+        use futures::FutureExt;
+        let call_future = std::panic::AssertUnwindSafe(executor.call_async(
+            tool_name,
+            arguments,
+            context,
+            version_hint,
+        ));
+        match call_future.catch_unwind().await {
+            Ok(Ok(result)) => {
                 let redacted_result = self.redact_output(tool_name, &result);
                 let text = self.format_result(&redacted_result);
                 let content = vec![ContentItem {
@@ -1223,13 +1226,26 @@ impl ExecutionRouter {
                     .map(|s| s.to_string());
                 (content, false, trace_id)
             }
-            Err(error) => {
+            Ok(Err(error)) => {
                 tracing::error!("handle_call error for {tool_name}: {error}");
                 let text = Self::build_error_text(&error);
                 (
                     vec![ContentItem {
                         content_type: "text".into(),
                         data: Value::String(text),
+                    }],
+                    true,
+                    None,
+                )
+            }
+            Err(_panic) => {
+                tracing::error!("handle_call: executor panicked for {tool_name}");
+                (
+                    vec![ContentItem {
+                        content_type: "text".into(),
+                        data: Value::String(format!(
+                            "Internal error: executor panicked while invoking {tool_name}"
+                        )),
                     }],
                     true,
                     None,
@@ -1683,7 +1699,6 @@ mod tests {
             tool_schemas: HashMap::new(),
             output_schemas: HashMap::new(),
             async_bridge: None,
-            async_module_ids: std::collections::HashSet::new(),
         };
         let result = router.format_result(&json!({"a": 1, "b": 2}));
         assert_eq!(result, "custom: 2 keys");
@@ -1701,7 +1716,6 @@ mod tests {
             tool_schemas: HashMap::new(),
             output_schemas: HashMap::new(),
             async_bridge: None,
-            async_module_ids: std::collections::HashSet::new(),
         };
         // Non-object values should fall back to JSON
         assert_eq!(router.format_result(&json!("string")), r#""string""#);
@@ -1721,7 +1735,6 @@ mod tests {
             tool_schemas: HashMap::new(),
             output_schemas: HashMap::new(),
             async_bridge: None,
-            async_module_ids: std::collections::HashSet::new(),
         };
         // Should fall back to JSON when formatter returns an error
         let result = router.format_result(&json!({"key": "value"}));
@@ -3691,8 +3704,8 @@ mod tests {
         let bridge = Arc::new(AsyncTaskBridge::new(make_apcore_executor_with_async(
             "some.module",
         )));
-        let router = ExecutionRouter::new(Box::new(MockExecutor), false, None)
-            .with_async_bridge(bridge, std::collections::HashSet::new());
+        let router =
+            ExecutionRouter::new(Box::new(MockExecutor), false, None).with_async_bridge(bridge);
         let (content, is_error, trace_id) = router
             .handle_call(
                 "__apcore_task_submit",
@@ -3724,11 +3737,15 @@ mod tests {
 
     #[tokio::test]
     async fn async_hinted_module_routes_via_bridge() {
-        let bridge = Arc::new(AsyncTaskBridge::new(make_apcore_executor()));
-        let mut ids = std::collections::HashSet::new();
-        ids.insert("heavy.module".to_string());
-        let router = ExecutionRouter::new(Box::new(MockExecutor), false, None)
-            .with_async_bridge(bridge, ids);
+        // [A-D-031] Static `async_module_ids` set has been dropped — the
+        // bridge dispatch is now driven entirely by dynamic descriptor
+        // lookup. Use an executor that has `heavy.module` registered as
+        // async-hinted so the bridge classifies it correctly at call time.
+        let bridge = Arc::new(AsyncTaskBridge::new(make_apcore_executor_with_async(
+            "heavy.module",
+        )));
+        let router =
+            ExecutionRouter::new(Box::new(MockExecutor), false, None).with_async_bridge(bridge);
         let (content, is_error, _) = router.handle_call("heavy.module", &json!({}), None).await;
         assert!(!is_error);
         let text = match &content[0].data {
@@ -3745,8 +3762,8 @@ mod tests {
     #[tokio::test]
     async fn meta_tool_submit_reserved_id_is_error() {
         let bridge = Arc::new(AsyncTaskBridge::new(make_apcore_executor()));
-        let router = ExecutionRouter::new(Box::new(MockExecutor), false, None)
-            .with_async_bridge(bridge, std::collections::HashSet::new());
+        let router =
+            ExecutionRouter::new(Box::new(MockExecutor), false, None).with_async_bridge(bridge);
         let (_content, is_error, _) = router
             .handle_call(
                 "__apcore_task_submit",
