@@ -92,6 +92,10 @@ impl JWTAuthenticator {
         if self.algorithms.len() > 1 {
             validation.algorithms = self.algorithms.clone();
         }
+        // [JWT-3] Spec mandates ~30s clock-skew leeway. jsonwebtoken's
+        // default Validation::leeway is 60s; align to 30s for parity
+        // with Python+TS post-fix and the documented value.
+        validation.leeway = 30;
 
         // Configure audience validation
         match &self.audience {
