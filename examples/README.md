@@ -118,33 +118,41 @@ serve(registry, transport="streamable-http", port=8000, explorer=True, allow_exe
 
 ---
 
-## Scenario coverage notes (cross-language)
-
-Python and TypeScript ship two additional example scenarios that the Rust
-crate does not yet provide:
+## Scenario coverage (cross-language)
 
 | Scenario | Python | TypeScript | Rust |
 |---|---|---|---|
-| `run` (default unified demo) | ✓ | ✓ | ✓ |
-| `extensions/` (filesystem-discovered modules) | ✓ | ✓ | ⚠ pending |
-| `binding_demo/` (`.binding.yaml`-driven, zero-code-intrusion modules) | ✓ | ✓ | ⚠ pending |
+| `run` (default unified demo) | ✓ | ✓ | ✓ — `cargo run --example run` |
+| `extensions/` (modules grouped per-file, registered as a sweep) | ✓ | ✓ | ✓ — `cargo run --example extensions` |
+| `binding_demo/` (`.binding.yaml`-driven, zero-code-intrusion modules) | ✓ | ✓ | ✓ — `cargo run --example binding_demo` |
 
-The patterns are exercised by the `run` example above:
+### `extensions/`
 
-- `examples/run/modules.rs` registers modules in-process — equivalent to
-  what `extensions/` would discover from a directory. The Rust apcore
-  Registry supports filesystem discovery via `Registry::discover_dir`;
-  a dedicated `extensions/` example would just narrow the launcher to
-  call `discover_dir` instead of inline registration.
-- `binding_demo/` requires `apcore-toolkit`'s `BindingLoader::load_binding_dir`
-  applied to a directory of `.binding.yaml` files. A Rust port is
-  tracked as a follow-up — the Rust `BindingLoader` API surface
-  (`apcore-toolkit = 0.5.0`) is available but not yet wired into a
-  full demo.
+Each module lives in its own logical unit (`text.echo`, `math.calc`,
+`greeting`) inside `examples/extensions/modules.rs`. The launcher
+(`main.rs`) calls `register_all(&registry)` to enumerate them all in a
+single sweep.
 
-Cross-reference: the equivalent Python examples live at
-`apcore-mcp-python/examples/extensions/` and
-`apcore-mcp-python/examples/binding_demo/`; TypeScript at
-`apcore-mcp-typescript/examples/extensions/` and
-`apcore-mcp-typescript/examples/binding_demo/`. A Rust port aiming for
-1:1 scenario parity should mirror those structures. [B-006, B-007]
+Python's equivalent (`extensions_dir="./examples/extensions"`) walks
+the filesystem via apcore's directory discoverer. The Rust port uses
+explicit enumeration for dependency-light startup; production code with
+many modules should register a `Discoverer` impl on the Registry
+instead of enumerating in-process.
+
+### `binding_demo/`
+
+Plain business logic in `myapp.rs` (no apcore imports), bound to MCP
+tools via `extensions/*.binding.yaml`. The launcher loads YAML metadata
+through `apcore-toolkit::BindingLoader` and registers a hand-written
+Module trait impl per binding's `target` string.
+
+Rust differs from Python here: Python uses runtime reflection
+(`importlib`) to dispatch `myapp:convert_temperature` at call time, so
+no per-binding wrapper is needed. Rust has no reflection, so each
+binding's `target` is matched in `module_for_target()` and dispatched
+through a thin `Module` impl that delegates to the plain function. The
+binding YAML still drives metadata (description, tags, annotations).
+
+Cross-reference: equivalent Python examples at
+`apcore-mcp-python/examples/{extensions,binding_demo}/`; TypeScript at
+`apcore-mcp-typescript/examples/{extensions,binding_demo}/`. [B-006, B-007]

@@ -60,3 +60,11 @@ path = "src/bin/apcore-mcp.rs"
 [[example]]
 name = "run"
 path = "examples/run/main.rs"
+
+[[example]]
+name = "extensions"
+path = "examples/extensions/main.rs"
+
+[[example]]
+name = "binding_demo"
+path = "examples/binding_demo/main.rs"

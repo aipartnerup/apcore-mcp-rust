@@ -1,0 +1,20 @@
+# Zero-code binding: maps myapp::convert_temperature → apcore module.
+# auto_schema infers input/output from Rust function signatures (when
+# apcore-toolkit's BindingLoader runs); for this Rust demo we wrap the
+# binding with a hand-written Module impl since Rust has no reflection.
+# Mirrors apcore-mcp-python/examples/binding_demo/extensions/.
+
+bindings:
+  - module_id: convert_temperature
+    target: myapp:convert_temperature
+    description: Convert temperature between Celsius, Fahrenheit, and Kelvin
+    tags:
+      - math
+      - conversion
+    version: 1.0.0
+    annotations:
+      readonly: true
+      destructive: false
+      idempotent: true
+      open_world: false
+    auto_schema: true
