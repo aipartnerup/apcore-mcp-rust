@@ -779,6 +779,7 @@ impl ExecutionRouter {
             // Source #2: extras._meta.apcore.version
             let from_meta = || {
                 extra
+                    .and_then(|v| v.get("_meta"))
                     .and_then(|v| v.get("apcore"))
                     .and_then(|v| v.get("version"))
                     .and_then(|v| v.as_str())
@@ -1076,7 +1077,7 @@ impl ExecutionRouter {
     /// missing, or when the string fails validation. Uses apcore's
     /// built-in header validation (W3C §2.2).
     pub fn extract_traceparent(extra: Option<&Value>) -> Option<TraceParent> {
-        let raw = extra?.get("traceparent")?.as_str()?;
+        let raw = extra?.get("_meta")?.get("traceparent")?.as_str()?;
         let mut headers = HashMap::new();
         headers.insert("traceparent".to_string(), raw.to_string());
         TraceContext::extract(&headers)
@@ -3722,15 +3723,34 @@ mod tests {
 
     #[tokio::test]
     async fn test_version_hint_flows_through() {
+        // [A-D-002 regression] Real MCP traffic carries the apcore version
+        // hint at extras._meta.apcore.version — not at extras.apcore.version.
+        // Verifies the `_meta` hop is honored in source #2 of the cascade.
         let captured: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
         let exec = VersionHintCapturingExecutor {
             captured: Arc::clone(&captured),
         };
         let router = ExecutionRouter::new(Box::new(exec), false, None);
-        let meta = json!({ "apcore": { "version": "2.0.1" } });
-        let (_content, is_error, _) = router.handle_call("mod", &json!({}), Some(&meta)).await;
+        let extras = json!({ "_meta": { "apcore": { "version": "2.0.1" } } });
+        let (_content, is_error, _) = router.handle_call("mod", &json!({}), Some(&extras)).await;
         assert!(!is_error);
         assert_eq!(captured.lock().unwrap().clone(), Some("2.0.1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_version_hint_ignores_top_level_apcore() {
+        // [A-D-002 regression] Confirms that putting the apcore stanza at
+        // the TOP level (legacy shape that pre-fix Rust accidentally accepted)
+        // is now correctly ignored — the cascade only honors `_meta.apcore.version`.
+        let captured: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+        let exec = VersionHintCapturingExecutor {
+            captured: Arc::clone(&captured),
+        };
+        let router = ExecutionRouter::new(Box::new(exec), false, None);
+        let extras = json!({ "apcore": { "version": "9.9.9" } });
+        let (_content, is_error, _) = router.handle_call("mod", &json!({}), Some(&extras)).await;
+        assert!(!is_error);
+        assert_eq!(captured.lock().unwrap().clone(), None);
     }
 
     // ==================================================================
@@ -3739,40 +3759,58 @@ mod tests {
 
     #[test]
     fn extract_traceparent_parses_valid_header() {
-        let meta = json!({
-            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        // [A-D-003 regression] Real MCP traffic nests traceparent under
+        // extras._meta.traceparent — extract_traceparent must honor that hop.
+        let extras = json!({
+            "_meta": {
+                "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+            }
         });
-        let tp = ExecutionRouter::extract_traceparent(Some(&meta)).expect("must parse");
+        let tp = ExecutionRouter::extract_traceparent(Some(&extras)).expect("must parse");
         assert_eq!(tp.trace_id, "4bf92f3577b34da6a3ce929d0e0e4736");
         assert_eq!(tp.parent_id, "00f067aa0ba902b7");
     }
 
     #[test]
     fn extract_traceparent_none_when_missing() {
-        let meta = json!({});
-        assert!(ExecutionRouter::extract_traceparent(Some(&meta)).is_none());
+        let extras = json!({});
+        assert!(ExecutionRouter::extract_traceparent(Some(&extras)).is_none());
+    }
+
+    #[test]
+    fn extract_traceparent_none_when_top_level_only() {
+        // [A-D-003 regression] Pre-fix Rust read traceparent at the top level
+        // of extras — confirm the legacy shape is now correctly rejected.
+        let extras = json!({
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        });
+        assert!(ExecutionRouter::extract_traceparent(Some(&extras)).is_none());
     }
 
     #[test]
     fn extract_traceparent_none_when_malformed() {
-        let meta = json!({ "traceparent": "not-a-valid-header" });
-        assert!(ExecutionRouter::extract_traceparent(Some(&meta)).is_none());
+        let extras = json!({ "_meta": { "traceparent": "not-a-valid-header" } });
+        assert!(ExecutionRouter::extract_traceparent(Some(&extras)).is_none());
     }
 
     #[test]
     fn extract_traceparent_none_when_all_zero_trace_id() {
-        let meta = json!({
-            "traceparent": "00-00000000000000000000000000000000-00f067aa0ba902b7-01"
+        let extras = json!({
+            "_meta": {
+                "traceparent": "00-00000000000000000000000000000000-00f067aa0ba902b7-01"
+            }
         });
-        assert!(ExecutionRouter::extract_traceparent(Some(&meta)).is_none());
+        assert!(ExecutionRouter::extract_traceparent(Some(&extras)).is_none());
     }
 
     #[tokio::test]
     async fn build_context_with_trace_inherits_trace_id() {
-        let meta = json!({
-            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        let extras = json!({
+            "_meta": {
+                "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+            }
         });
-        let tp = ExecutionRouter::extract_traceparent(Some(&meta));
+        let tp = ExecutionRouter::extract_traceparent(Some(&extras));
         let extra = CallExtra {
             progress_token: None,
             send_notification: None,
@@ -3787,11 +3825,13 @@ mod tests {
     #[tokio::test]
     async fn handle_call_inherits_traceparent_trace_id() {
         let router = ExecutionRouter::new(Box::new(MockExecutor), false, None);
-        let meta = json!({
-            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        let extras = json!({
+            "_meta": {
+                "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+            }
         });
         let (_content, is_error, trace_id) =
-            router.handle_call("mod", &json!({}), Some(&meta)).await;
+            router.handle_call("mod", &json!({}), Some(&extras)).await;
         assert!(!is_error);
         assert_eq!(
             trace_id,
