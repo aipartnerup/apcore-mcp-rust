@@ -50,7 +50,7 @@ cargo add apcore-mcp
 cargo install apcore-mcp
 ```
 
-Requires Rust 1.75+ and `apcore >= 0.17.1`.
+Requires Rust 1.75+ and `apcore >= 0.19.0`.
 
 ## Quick Start
 
@@ -69,40 +69,42 @@ All modules are auto-discovered and exposed as MCP tools. No code needed.
 The `APCoreMCP` builder is the recommended entry point — one object, all capabilities:
 
 ```rust
+use std::sync::Arc;
+use apcore::config::Config;
+use apcore::executor::Executor;
+use apcore::registry::registry::Registry;
 use apcore_mcp::APCoreMCP;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Create a registry and register your modules.
+    let registry = Registry::new();
+    // registry.register("my.tool", Box::new(MyModule), descriptor)?;
+
+    // 2. Wrap it in an Executor — APCoreMCP requires an executor backend.
+    let executor = Arc::new(Executor::new(registry, Config::default()));
+
+    // 3. Build and serve.
     let mcp = APCoreMCP::builder()
-        .backend("./extensions")
+        .backend(executor)
         .name("my-server")
         .transport("streamable-http")
         .port(8000)
         .build()?;
 
-    // Launch as MCP Server
+    // serve() is synchronous and blocks. It spawns its own Tokio runtime;
+    // do NOT call it from inside an active runtime (use async_serve() for
+    // embedded use, see API Overview below).
     mcp.serve()?;
 
     Ok(())
 }
 ```
 
-You can also pass an existing `Registry` or `Executor`:
-
-```rust
-use std::sync::Arc;
-use apcore::registry::registry::Registry;
-use apcore_mcp::APCoreMCP;
-
-let registry = Arc::new(Registry::new());
-// ... register modules ...
-
-let mcp = APCoreMCP::builder()
-    .backend(registry)
-    .name("my-server")
-    .tags(vec!["public".into()])
-    .build()?;
-```
+> **Backend note (v0.14.0):** The Rust SDK's `BackendSource::Executor` is the
+> functional path. `BackendSource::ExtensionsDir` (string path) and
+> `BackendSource::Registry` are reserved variants that currently return a
+> `BackendResolution` error from `build()` — wrap your registry in an
+> `Executor` first, as shown above.
 
 <details>
 <summary>Function-based API (still supported)</summary>
@@ -110,9 +112,10 @@ let mcp = APCoreMCP::builder()
 ```rust
 use apcore_mcp::{serve, to_openai_tools, ServeConfig, OpenAIToolsConfig};
 
-serve("./extensions", ServeConfig::default())?;
+// Pass an Arc<Executor> as the backend (same constraint as the builder API).
+serve(executor.clone(), ServeConfig::default())?;
 
-let tools = to_openai_tools("./extensions", OpenAIToolsConfig::default())?;
+let tools = to_openai_tools(executor, OpenAIToolsConfig::default())?;
 ```
 </details>
 
@@ -254,10 +257,10 @@ Exit codes: `0` normal, `1` invalid arguments, `2` startup failure.
 The unified entry point — configure once, use everywhere:
 
 ```rust
-use apcore_mcp::{APCoreMCP, ServeOptions};
+use apcore_mcp::APCoreMCP;
 
 let mcp = APCoreMCP::builder()
-    .backend("./extensions")             // path, Arc<Registry>, or Arc<Executor>
+    .backend(executor)                   // Arc<Executor> (the functional backend in v0.14.0)
     .name("apcore-mcp")                  // server name
     .version("1.0.0")                    // defaults to crate version
     .tags(vec!["public".into()])         // filter modules by tags
@@ -272,8 +275,10 @@ let mcp = APCoreMCP::builder()
     .approval_handler(handler)           // approval handler for runtime approval
     .build()?;
 
-// Launch as MCP server (blocking)
-mcp.serve(ServeOptions::default())?;
+// Launch as MCP server (synchronous, blocking; spawns its own Tokio runtime).
+// Use `serve_with_options(ServeOptions { ... })` to pass on_startup/on_shutdown
+// hooks, the explorer config, or `dynamic = true`.
+mcp.serve()?;
 
 // Export as OpenAI tools
 let tools = mcp.to_openai_tools(false, true)?;
@@ -305,23 +310,33 @@ serve("./extensions", ServeConfig {
 Embed the MCP server into a larger application (e.g. co-host with other services):
 
 ```rust
-use apcore_mcp::AsyncServeOptions;
+use apcore_mcp::{AsyncServeOptions, ExplorerOptions};
 
 let app = mcp.async_serve(AsyncServeOptions {
-    explorer: true,
+    // explorer is an ExplorerOptions struct, not a bool — set the
+    // inner `explorer: true` flag to mount the Tool Explorer UI.
+    explorer: ExplorerOptions {
+        explorer: true,
+        ..Default::default()
+    },
     ..Default::default()
 }).await?;
-// Mount `app` into your own axum Router
+// Mount `app` (an axum::Router) into your own axum Router
 ```
 
 ### Tool Explorer
 
-When `explorer=true` is passed to `serve()`, a browser-based Tool Explorer UI is mounted on HTTP transports. It provides an interactive page for browsing tool schemas and testing tool execution.
+When `explorer.explorer = true` is passed via `ServeOptions`, a browser-based Tool Explorer UI is mounted on HTTP transports. It provides an interactive page for browsing tool schemas and testing tool execution.
 
 ```rust
-mcp.serve(ServeOptions {
-    explorer: true,
-    allow_execute: true,
+use apcore_mcp::{ExplorerOptions, ServeOptions};
+
+mcp.serve_with_options(ServeOptions {
+    explorer: ExplorerOptions {
+        explorer: true,
+        allow_execute: true,
+        ..Default::default()
+    },
     ..Default::default()
 })?;
 // Open http://127.0.0.1:8000/explorer/ in a browser
@@ -350,7 +365,7 @@ use apcore_mcp::JWTAuthenticator;
 let auth = JWTAuthenticator::new("my-secret", None, None, None, None, None, None);
 
 let mcp = APCoreMCP::builder()
-    .backend("./extensions")
+    .backend(executor)  // Arc<Executor> — see Quick Start for setup
     .transport("streamable-http")
     .authenticator(auth)
     .build()?;
@@ -378,7 +393,7 @@ use apcore_mcp::ElicitationApprovalHandler;
 let handler = ElicitationApprovalHandler::new(None);
 
 let mcp = APCoreMCP::builder()
-    .backend("./extensions")
+    .backend(executor)  // Arc<Executor> — see Quick Start for setup
     .approval_handler(Arc::new(handler))
     .build()?;
 ```
@@ -409,7 +424,7 @@ let formatter = Box::new(|val: &serde_json::Value| -> Result<String, Box<dyn std
 });
 
 let mcp = APCoreMCP::builder()
-    .backend("./extensions")
+    .backend(executor)  // Arc<Executor> — see Quick Start for setup
     .output_formatter(formatter)
     .build()?;
 ```
