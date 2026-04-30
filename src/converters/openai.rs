@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use apcore::module::ModuleAnnotations;
+use apcore::registry::registry::Registry;
 use serde_json::Value;
 
 use crate::adapters::{AdapterError, AnnotationMapper, ModuleIDNormalizer, SchemaConverter};
@@ -42,6 +43,71 @@ impl OpenAIConverter {
             _annotation_mapper: AnnotationMapper,
             _id_normalizer: ModuleIDNormalizer,
         }
+    }
+
+    /// Convert all modules in an apcore [`Registry`] to OpenAI tool definitions.
+    ///
+    /// Primary public API matching Python+TS duck-typed Registry object interface.
+    /// Calls `registry.list()` and `registry.get_definition()` to enumerate
+    /// modules, then delegates to [`Self::convert_descriptor`]. [D11-024]
+    ///
+    /// # Arguments
+    /// * `registry` — a live apcore Registry.
+    /// * `embed_annotations` — if true, append annotation hints to descriptions.
+    /// * `strict` — if true, enable OpenAI strict mode on schemas.
+    /// * `tags` — if provided, only include modules whose tags contain ALL specified tags.
+    /// * `prefix` — if provided, only include modules whose ID starts with the prefix.
+    pub fn convert_registry_apcore(
+        &self,
+        registry: &Registry,
+        embed_annotations: bool,
+        strict: bool,
+        tags: Option<&[&str]>,
+        prefix: Option<&str>,
+    ) -> Result<Vec<Value>, ConverterError> {
+        let module_ids = registry.list(tags, prefix);
+        let mut tools = Vec::new();
+        let mut seen_names: HashMap<String, String> = HashMap::new();
+        // Sort for deterministic output
+        let mut sorted_ids = module_ids;
+        sorted_ids.sort();
+
+        for module_id in &sorted_ids {
+            let Some(descriptor) = registry.get_definition(module_id) else {
+                continue;
+            };
+            let description = descriptor.description.clone();
+            // Build a JSON Value from the descriptor for convert_descriptor.
+            let descriptor_json = serde_json::json!({
+                "input_schema": descriptor.input_schema,
+                "annotations": descriptor.annotations,
+                "tags": descriptor.tags,
+            });
+            let tool = self.convert_descriptor(
+                module_id,
+                &descriptor_json,
+                &description,
+                embed_annotations,
+                strict,
+            )?;
+            let tool_name = tool
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+                .to_string();
+            if let Some(existing) = seen_names.get(&tool_name) {
+                if existing != module_id {
+                    return Err(ConverterError::StrictMode(format!(
+                        "OpenAI function-name collision: module ids '{existing}' and \
+                         '{module_id}' both normalize to '{tool_name}'."
+                    )));
+                }
+            }
+            seen_names.insert(tool_name, module_id.clone());
+            tools.push(tool);
+        }
+        Ok(tools)
     }
 
     /// Convert all modules in a registry to OpenAI tool definitions.
@@ -1595,5 +1661,109 @@ mod tests {
             .unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0]["function"]["description"], "");
+    }
+
+    // ---- Issue D11-024: convert_registry_apcore with live Registry ----------
+
+    #[test]
+    fn test_convert_registry_apcore_empty_registry() {
+        // [D11-024] convert_registry_apcore must work with live apcore Registry.
+        use apcore::registry::registry::Registry;
+        use std::sync::Arc;
+
+        let registry = Arc::new(Registry::default());
+        let converter = OpenAIConverter::new();
+        let result = converter
+            .convert_registry_apcore(&registry, false, false, None, None)
+            .unwrap();
+        assert!(
+            result.is_empty(),
+            "empty registry must produce empty tools list"
+        );
+    }
+
+    #[test]
+    fn test_convert_registry_apcore_with_module() {
+        // [D11-024] convert_registry_apcore enumerates live Registry and produces tools.
+        use apcore::context::Context;
+        use apcore::errors::ModuleError;
+        use apcore::module::Module;
+        use apcore::registry::{registry::Registry, ModuleDescriptor};
+        use std::sync::Arc;
+
+        #[derive(Debug)]
+        struct Noop;
+        #[async_trait::async_trait]
+        impl Module for Noop {
+            fn input_schema(&self) -> serde_json::Value {
+                json!({"type":"object","properties":{}})
+            }
+            fn output_schema(&self) -> serde_json::Value {
+                json!({"type":"object"})
+            }
+            fn description(&self) -> &str {
+                "no-op"
+            }
+            async fn execute(
+                &self,
+                _: serde_json::Value,
+                _: &Context<serde_json::Value>,
+            ) -> Result<serde_json::Value, ModuleError> {
+                Ok(json!({}))
+            }
+        }
+
+        let registry = Arc::new(Registry::default());
+        let descriptor = ModuleDescriptor {
+            module_id: "math.add".to_string(),
+            name: None,
+            description: "Add two numbers".to_string(),
+            documentation: None,
+            input_schema: json!({"type":"object","properties":{"a":{"type":"number"},"b":{"type":"number"}},"required":["a","b"]}),
+            output_schema: json!({"type":"object"}),
+            version: "1.0.0".to_string(),
+            tags: vec![],
+            annotations: None,
+            examples: vec![],
+            metadata: std::collections::HashMap::new(),
+            display: None,
+            sunset_date: None,
+            dependencies: vec![],
+            enabled: true,
+        };
+        registry
+            .register("math.add", Box::new(Noop), descriptor)
+            .unwrap();
+
+        let converter = OpenAIConverter::new();
+        let result = converter
+            .convert_registry_apcore(&registry, false, false, None, None)
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["function"]["name"], "math-add");
+        assert_eq!(result[0]["function"]["description"], "Add two numbers");
+    }
+
+    // ---- Issue D11-019 partial: arguments format is JSON not debug repr -----
+
+    #[test]
+    fn test_approval_arguments_format_is_json() {
+        // [D11-019] Confirming test: serde_json::Value::to_string produces JSON
+        // format ({"key":"val"}), not Rust debug repr ({key: "val"}).
+        // This test documents the correct behavior in the converter layer.
+        let args = json!({"key": "val"});
+        let formatted = args.to_string();
+        assert!(
+            formatted.contains("\"key\""),
+            "arguments must be JSON-formatted: {formatted}"
+        );
+        assert!(
+            formatted.contains("\"val\""),
+            "arguments must be JSON-formatted: {formatted}"
+        );
+        assert!(
+            !formatted.contains("key: "),
+            "must NOT be Rust debug repr: {formatted}"
+        );
     }
 }
