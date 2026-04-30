@@ -46,7 +46,6 @@ tokio-stream = "0.1"
 futures = "0.3"
 
 [dev-dependencies]
-tokio-test = "0.4"
 tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }

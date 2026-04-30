@@ -37,7 +37,7 @@ pub use crate::apcore_mcp::{async_serve, serve, to_openai_tools};
 pub use crate::auth::jwt::{ClaimMapping, JWTAuthenticator};
 // [D9-009] extract_headers is internal (pub(crate)) — not re-exported.
 pub use crate::auth::middleware::{AuthMiddlewareLayer, AuthMiddlewareService, AUTH_IDENTITY};
-pub use crate::auth::protocol::Authenticator;
+pub use crate::auth::protocol::{Authenticator, Identity};
 
 // ---- Re-exports: server -----------------------------------------------------
 pub use crate::server::factory::MCPServerFactory;
@@ -63,4 +63,10 @@ pub use crate::config::{mcp_defaults, register_mcp_namespace, MCP_ENV_PREFIX, MC
 pub use crate::converters::openai::{ConverterError, OpenAIConverter};
 
 // ---- Re-exports: helpers ----------------------------------------------------
-pub use crate::helpers::{elicit, report_progress, ElicitResult};
+pub use crate::helpers::{elicit, report_progress, ElicitResult, MCP_ELICIT_KEY, MCP_PROGRESS_KEY};
+
+// ---- Re-exports: constants --------------------------------------------------
+// Match top-level surface of apcore-mcp-python (REGISTRY_EVENTS, ERROR_CODES,
+// MODULE_ID_PATTERN) and apcore-mcp-typescript (REGISTRY_EVENTS, ErrorCodes,
+// MODULE_ID_PATTERN, APCORE_EVENTS).
+pub use crate::constants::{apcore_events, ErrorCode, RegistryEvent, MODULE_ID_PATTERN};
