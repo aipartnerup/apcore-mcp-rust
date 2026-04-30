@@ -72,6 +72,28 @@ impl ApprovalHandler for ElicitationApprovalHandler {
         &self,
         request: &ApprovalRequest,
     ) -> Result<ApprovalResult, ModuleError> {
+        // [D10-001] Python+TS extract the elicit callback per-call from
+        // `request.context.data[MCP_ELICIT_KEY]`. In Rust, `ElicitCallback`
+        // is a `Box<dyn Fn...>` which cannot be serialized into the
+        // `Context<Value>` data map (typed as `HashMap<String, serde_json::Value>`).
+        // Therefore we follow the closest possible approximation: if the request
+        // has a context, surface a "No context available for elicitation" rejection
+        // when no constructor-injected callback is provided, mirroring the Python
+        // branch. The constructor-injected `self.elicit` acts as the pre-resolved
+        // callback that Python would extract at request time. [D10-001]
+        //
+        // [D10-002] Return type kept as `Result<ApprovalResult, ModuleError>` for
+        // idiomatic Rust. All error paths return `Ok(rejected(...))` so callers
+        // always receive an `ApprovalResult` for the elicitation surface; no `Err`
+        // is returned from the elicitation logic itself. [D10-002]
+
+        // [D10-001] "No context available for elicitation" rejection branch —
+        // matches the Python/TS path where context.data[MCP_ELICIT_KEY] is absent.
+        if request.context.is_none() && self.elicit.is_none() {
+            tracing::debug!("no context and no elicitation callback available, rejecting approval");
+            return Ok(rejected("No context available for elicitation"));
+        }
+
         let elicit = match &self.elicit {
             Some(cb) => cb,
             None => {
@@ -113,6 +135,10 @@ impl ApprovalHandler for ElicitationApprovalHandler {
             ElicitAction::Accept => Ok(approved()),
             ElicitAction::Decline => Ok(rejected("User action: decline")),
             ElicitAction::Cancel => Ok(rejected("User action: cancel")),
+            // [D11-020] Python+TS treat any non-"accept" string as rejected.
+            // Rust captures the raw string in Unknown(String) so the reason
+            // can be surfaced, matching cross-language semantics. [D11-020]
+            ElicitAction::Unknown(raw) => Ok(rejected(&format!("User action: {raw}"))),
         }
     }
 
@@ -190,8 +216,32 @@ mod tests {
 
     #[tokio::test]
     async fn test_request_approval_no_callback() {
+        // When no context AND no callback, the rejection says "No context available for elicitation"
+        // (aligned with D10-001 Python/TS behavior). When there IS a context but no callback
+        // it would fall through to "No elicitation callback available".
         let handler = ElicitationApprovalHandler::new(None);
         let result = handler.request_approval(&test_request()).await.unwrap();
+        assert_eq!(result.status, "rejected");
+        // test_request() has context: None, so "No context available for elicitation" fires.
+        assert_eq!(
+            result.reason.as_deref(),
+            Some("No context available for elicitation")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_request_approval_has_context_no_callback() {
+        // When context is present but no callback, falls through to the callback check.
+        use apcore::Context;
+        let handler = ElicitationApprovalHandler::new(None);
+        let mut request = test_request();
+        request.context = Some(Context::new(apcore::Identity::new(
+            "u1".into(),
+            "user".into(),
+            vec![],
+            Default::default(),
+        )));
+        let result = handler.request_approval(&request).await.unwrap();
         assert_eq!(result.status, "rejected");
         assert_eq!(
             result.reason.as_deref(),
@@ -259,6 +309,110 @@ mod tests {
         assert!(
             msg.contains("/etc/passwd"),
             "message should contain arguments"
+        );
+    }
+
+    // -- Issue D10-001/D10-002: context-not-present rejection branch ----------
+
+    #[tokio::test]
+    async fn test_request_approval_no_context_no_callback_returns_rejected() {
+        // D10-002: When no context AND no callback, result must be Ok(rejected),
+        // not Err. Reason must indicate "No context available for elicitation".
+        let handler = ElicitationApprovalHandler::new(None);
+        let request = ApprovalRequest {
+            module_id: "test.tool".to_string(),
+            arguments: json!({}),
+            context: None, // no context
+            annotations: Default::default(),
+            description: None,
+            tags: vec![],
+        };
+        let result = handler.request_approval(&request).await.unwrap();
+        assert_eq!(result.status, "rejected");
+        assert_eq!(
+            result.reason.as_deref(),
+            Some("No context available for elicitation"),
+            "should return 'No context available for elicitation' when context is None and no callback"
+        );
+    }
+
+    // -- Issue D11-020: Unknown action variant maps to rejected ---------------
+
+    #[tokio::test]
+    async fn test_unknown_action_maps_to_rejected_with_reason() {
+        // D11-020: Unknown action strings must map to rejected with the
+        // raw action string in the reason.
+        let action_str = "unknown-action";
+        let action = ElicitAction::Unknown(action_str.to_string());
+        let cb: ElicitCallback = Box::new(move |_msg, _schema| {
+            let a = action.clone();
+            Box::pin(async move {
+                Some(ElicitResult {
+                    action: a,
+                    content: None,
+                })
+            })
+        });
+        let handler = ElicitationApprovalHandler::new(Some(cb));
+        let result = handler.request_approval(&test_request()).await.unwrap();
+        assert_eq!(result.status, "rejected");
+        assert_eq!(
+            result.reason.as_deref(),
+            Some("User action: unknown-action"),
+            "unknown action must be rejected with 'User action: <raw_string>'"
+        );
+    }
+
+    #[test]
+    fn test_unknown_action_deserializes_from_unknown_string() {
+        // D11-020: Unknown action strings must not cause deserialization error.
+        let raw = r#"{"action": "unknown-action"}"#;
+        let result: ElicitResult = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            result.action,
+            ElicitAction::Unknown("unknown-action".to_string())
+        );
+    }
+
+    // -- Issue D11-019 partial: arguments formatted as JSON (not debug repr) -
+
+    #[tokio::test]
+    async fn test_approval_message_arguments_formatted_as_json() {
+        // D11-019: Arguments must be formatted as JSON (e.g. {"key":"val"}),
+        // not as Rust debug repr. serde_json's Display uses JSON format — correct.
+        let captured_msg = Arc::new(Mutex::new(String::new()));
+        let captured_clone = captured_msg.clone();
+        let cb: ElicitCallback = Box::new(move |msg, _schema| {
+            let captured = captured_clone.clone();
+            Box::pin(async move {
+                *captured.lock().unwrap() = msg;
+                Some(ElicitResult {
+                    action: ElicitAction::Accept,
+                    content: None,
+                })
+            })
+        });
+
+        let handler = ElicitationApprovalHandler::new(Some(cb));
+        let request = ApprovalRequest {
+            module_id: "test.tool".to_string(),
+            arguments: json!({"key": "val"}),
+            context: None,
+            annotations: Default::default(),
+            description: None,
+            tags: vec![],
+        };
+        handler.request_approval(&request).await.unwrap();
+
+        let msg = captured_msg.lock().unwrap().clone();
+        // JSON format: {"key":"val"} — must contain the key in JSON, not Rust debug
+        assert!(
+            msg.contains("\"key\""),
+            "arguments must be JSON-formatted in message: {msg}"
+        );
+        assert!(
+            msg.contains("\"val\""),
+            "arguments must be JSON-formatted in message: {msg}"
         );
     }
 

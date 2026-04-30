@@ -16,8 +16,12 @@ use serde_json::Value;
 // ---------------------------------------------------------------------------
 
 /// The action taken by the user in response to an elicitation prompt.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
+///
+/// The `Unknown(String)` variant is a catch-all for any action string not
+/// explicitly listed. Python+TS treat any non-"accept" string as rejected;
+/// Rust captures the raw string so the reason can be surfaced at the caller.
+/// [D11-020]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema)]
 pub enum ElicitAction {
     /// The user accepted the prompt.
     Accept,
@@ -25,6 +29,31 @@ pub enum ElicitAction {
     Decline,
     /// The user cancelled the prompt.
     Cancel,
+    /// An unknown/unrecognised action string received from the client.
+    Unknown(String),
+}
+
+impl serde::Serialize for ElicitAction {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            ElicitAction::Accept => s.serialize_str("accept"),
+            ElicitAction::Decline => s.serialize_str("decline"),
+            ElicitAction::Cancel => s.serialize_str("cancel"),
+            ElicitAction::Unknown(raw) => s.serialize_str(raw),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ElicitAction {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(match s.as_str() {
+            "accept" => ElicitAction::Accept,
+            "decline" => ElicitAction::Decline,
+            "cancel" => ElicitAction::Cancel,
+            other => ElicitAction::Unknown(other.to_string()),
+        })
+    }
 }
 
 /// Result of an elicitation request.
@@ -178,9 +207,22 @@ mod tests {
     }
 
     #[test]
-    fn elicit_action_rejects_unknown_variant() {
+    fn elicit_action_unknown_variant_maps_to_unknown() {
+        // [D11-020] Unknown action strings must NOT error; they map to Unknown(String).
+        // Python+TS treat any non-"accept" string as rejected; Rust captures the
+        // raw value so the reason can be surfaced at the caller.
         let result = serde_json::from_str::<ElicitAction>("\"unknown\"");
-        assert!(result.is_err());
+        assert!(result.is_ok());
+        assert_eq!(
+            result.unwrap(),
+            ElicitAction::Unknown("unknown".to_string())
+        );
+    }
+
+    #[test]
+    fn elicit_action_unknown_serializes_raw() {
+        let action = ElicitAction::Unknown("foobar".to_string());
+        assert_eq!(serde_json::to_string(&action).unwrap(), "\"foobar\"");
     }
 
     // -- ElicitResult serde round-trip tests --------------------------------

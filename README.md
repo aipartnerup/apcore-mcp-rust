@@ -280,8 +280,13 @@ let mcp = APCoreMCP::builder()
 // hooks, the explorer config, or `dynamic = true`.
 mcp.serve()?;
 
-// Export as OpenAI tools
-let tools = mcp.to_openai_tools(false, true)?;
+// Export as OpenAI tools.
+// The method takes (embed_annotations, strict) as positional booleans;
+// use named-arg-style locals so the call reads consistently with the
+// OpenAIToolsConfig form shown later in this guide.
+let embed_annotations = false;
+let strict = true;
+let tools = mcp.to_openai_tools(embed_annotations, strict)?;
 
 // Inspect
 let tool_names = mcp.tools();     // list of module IDs
@@ -293,8 +298,15 @@ let executor = mcp.executor();    // underlying Executor
 
 ```rust
 use apcore_mcp::{serve, ServeConfig};
+use std::sync::Arc;
 
-serve("./extensions", ServeConfig {
+// As noted in the builder caveat above, BackendSource::ExtensionsDir
+// (string path) currently returns a BackendResolution error. Build an
+// Executor first and pass it as the backend.
+let registry: Arc<apcore::Registry> = /* load extensions, e.g. via apcore::load_extensions("./extensions")? */;
+let executor: Arc<apcore::Executor> = Arc::new(apcore::Executor::new(registry));
+
+serve(executor, ServeConfig {
     transport: "streamable-http".into(),
     host: "127.0.0.1".into(),
     port: 8000,
@@ -461,8 +473,14 @@ When `metrics_collector` is provided, a `/metrics` HTTP endpoint is exposed that
 
 ```rust
 use apcore_mcp::{to_openai_tools, OpenAIToolsConfig};
+use std::sync::Arc;
 
-let tools = to_openai_tools("./extensions", OpenAIToolsConfig {
+// Same backend constraint as serve(): pass an Arc<Executor>, not a
+// path string (BackendSource::ExtensionsDir currently errors out).
+let registry: Arc<apcore::Registry> = /* load extensions, e.g. via apcore::load_extensions("./extensions")? */;
+let executor: Arc<apcore::Executor> = Arc::new(apcore::Executor::new(registry));
+
+let tools = to_openai_tools(executor, OpenAIToolsConfig {
     embed_annotations: false,   // append annotation hints to descriptions
     strict: true,               // OpenAI Structured Outputs strict mode
     tags: Some(vec!["image".into()]),  // filter by tags
@@ -575,7 +593,7 @@ git clone https://github.com/aiperceivable/apcore-mcp-rust.git
 cd apcore-mcp-rust
 make setup                       # install toolchain + pre-commit hook
 make check                       # run all checks
-cargo test                       # 671 tests
+cargo test                       # comprehensive test suite spanning unit + integration tests across server, auth, adapters, converters, helpers, async-task, explorer layers (~821 tests)
 ```
 
 ### Common Commands

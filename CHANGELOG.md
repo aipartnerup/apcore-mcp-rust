@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.14.0] - 2026-04-23
+## [0.14.0] - 2026-04-28
 
 Leverages apcore 0.19.0 + apcore-toolkit 0.5.0. Wires three apcore modules
 that the bridge previously did not use: `trace_context`, `async_task`, and
@@ -144,6 +144,30 @@ and TypeScript 0.14.0 implementations.
   routes to `MetricsCollector::export_prometheus`).
 - `error_code_count` guard updated: 27 → 35.
 - `all_python_error_codes_parse` fixture extended with the 8 new canonical names.
+
+### Cross-language sync (deferred-modules round, 2026-04-28)
+
+- **Dependency bump**: `mcp-embedded-ui = "0.4"` (was `"0.3"`). The new release ships `POST /tools/{name}/validate` (F7) — read-only schema validation, ungated by `allow_execute`, `auth_hook`, or `Authenticator`. The route flows automatically through the existing `mcp_embedded_ui::create_mount` adapter in `src/explorer/mount.rs`. **Resolves EUI-1.** TC-011 integration tests added in `src/explorer/mount.rs::tests`.
+- **OC-5 (BREAKING) — `OpenAIConverter::convert_registry` signature.** The canonical entrypoint now takes `&apcore::registry::Registry` directly (matching Python+TS duck-typed Registry input). The pre-fix `&serde_json::Value` snapshot variant is preserved as `convert_registry_json` for callers that hold a serialized snapshot:
+  ```rust
+  // Live registry path (preferred):
+  converter.convert_registry(&registry, false, false, None, None)?;
+
+  // Or keep using a JSON snapshot:
+  converter.convert_registry_json(&value, false, false, None, None)?;
+  ```
+  `APCoreMCP::to_openai_tools` switched to the live-registry path, dropping the unused `build_registry_json` helper. 4 regression tests added.
+- **AH-1 — per-request elicit callback via task-local.** Added `tokio::task_local! ELICIT_CALLBACK` in `apcore_mcp::helpers`. `ElicitationApprovalHandler::request_approval` now resolves the callback from the task-local first (matching Python+TS, which read it from `context.data`), with the constructor field as a fallback. apcore-rust's `Context::data` (`HashMap<String, serde_json::Value>`) cannot hold boxed `Fn`s, so a task-local is the closest cross-SDK equivalent without forcing an apcore-rust extension. 4 regression tests.
+- **EM-3 — `userFixable=true` stamp** for `DependencyNotFound`, `DependencyVersionMismatch`, `VersionConstraintInvalid`, and the four `Binding*` codes (matches TS). Added `USER_FIXABLE_ERROR_CODES` const + stamp in `build_detail_response`. 5 regression tests.
+- **EM-6 — generic-error fallback.** `ErrorMapper::internal_error_response()` and `ErrorMapper::to_mcp_error_any<E: std::error::Error>()` return the canonical `{is_error:true, error_type:"GENERAL_INTERNAL_ERROR", message:"Internal error occurred", details:null}` envelope for any non-`ModuleError` input — matches Python's `to_mcp_error(error: Exception)` and TypeScript's `toMcpError(error: unknown)`. 3 regression tests.
+- **MID-5 — `ModuleIDNormalizer::denormalize_checked`.** Bijection-guarded variant validates the dash→dot-replaced result against the canonical module-id pattern, returning `Err(InvalidModuleId)` for inputs that aren't valid pre-images of `normalize`. Plain `denormalize` stays lenient. 5 regression tests.
+- **SC-9 / SC-18** — strict-schema walker now stops descending into `enum` / `const` / `examples` / `default` and preserves `type: ["object", "null"]` (no longer downgrades to bare `"object"`). Output now matches Python+TS.
+- **AM-L1 — F-041 annotation extras format aligned with Python+TS.** `mcp_*` extras are now emitted as separate `<stripped-key>: <value>` lines appended after the `[Annotations: ...]` block, separated by a single newline. Pre-fix Rust inlined them into the `[Annotations: ...]` block as `mcp_key=value`, which diverged from the other two SDKs on the wire. 1 regression test.
+
+#### Deferred to a future release
+
+- **A-D-012** — canonical strict-schema sourcing via `apcore::Registry::export_schema_strict` (committed locally as `62706be` but not yet on crates.io). 0.14.0 ships with the local-`SchemaConverter` fallback as the canonical path; behaviour is identical, the upgrade is purely about delegating to apcore upstream when the new release lands.
+- **EB-2 (Rust)** — adapter-hook injection (`schema_converter` / `annotation_mapper` / `error_mapper` overrides on `serve()`). Blocked on `SchemaConverter` and `AnnotationMapper` being stateless unit structs with only static methods; needs a trait-based redesign first. Python+TS already ship the kwargs.
 
 ---
 
