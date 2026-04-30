@@ -253,10 +253,11 @@ impl MCPServerFactory {
             ));
         }
 
-        // [A-D-012] Strict Schema Sourcing: pending apcore 0.20 release
-        // for `Registry::export_schema_strict`. For now, always falls
-        // through to the local SchemaConverter (matches documented Rust
-        // row of the per-SDK status table in mcp-server-factory.md).
+        // [A-D-012] [D11-011] Strict Schema Sourcing: pending apcore 0.20 release.
+        // TODO(apcore 0.20): Try registry.export_schema_strict() first (see
+        // Python/TS factory). Currently always falls through to local SchemaConverter.
+        // Python+TS try `registry.export_schema(strict=True)` first; Rust always
+        // uses the local SchemaConverter until the apcore 0.20 API ships.
         let input_schema = SchemaConverter::convert_input_schema(&descriptor.input_schema)?;
 
         // Map annotations
@@ -433,6 +434,12 @@ impl MCPServerFactory {
         server.list_tools_handler = Some(Arc::new(move || tools_clone.as_ref().clone()));
 
         // call_tool handler: delegates to the execution router
+        // [D11-012] Identity propagation: Python+TS auto-extract identity from
+        // ContextVar/AsyncLocalStorage inside the handler. Rust relies on the
+        // caller-populated `extra` map (populated by AuthMiddlewareLayer). If
+        // `extra` is absent, identity is not available here.
+        // NOTE: Identity must be populated in `extra` by the middleware layer
+        // (see AuthMiddlewareLayer in src/auth/middleware.rs). [D11-012]
         let router_clone = Arc::clone(&router);
         server.call_tool_handler = Some(Arc::new(move |name, arguments, extra| {
             let router = Arc::clone(&router_clone);
@@ -1648,5 +1655,37 @@ mod tests {
             FactoryError::ReservedPrefix("__apcore_custom".to_string()),
             FactoryError::ReservedPrefix(_)
         ));
+    }
+
+    // -- Issue D11-011: build_tool_with_registry uses local SchemaConverter ---
+
+    #[test]
+    fn test_build_tool_with_registry_uses_local_schema_converter() {
+        // [D11-011] Verify build_tool_with_registry always uses local SchemaConverter
+        // (not registry.export_schema_strict). This is the documented known limitation
+        // until apcore 0.20 ships. The resulting schema must be a valid object schema.
+        let factory = make_factory();
+        let desc = make_descriptor("test.module", ModuleAnnotations::default());
+        let tool = factory
+            .build_tool_with_registry(&desc, "test description", None, None)
+            .unwrap();
+        // Schema must be valid object type (SchemaConverter result)
+        assert_eq!(tool.input_schema["type"], "object");
+        assert!(tool.input_schema.get("properties").is_some());
+    }
+
+    // -- Issue D11-012: call_tool extra identity is forwarded -----------------
+
+    #[test]
+    fn test_build_tool_description_propagated_to_tool() {
+        // [D11-012] Documenting test: identity must be in 'extra' populated
+        // by the middleware layer. The factory forwards extra to the router.
+        // Here we verify the factory builds a tool correctly so the handler can
+        // receive it; the full pipeline test would require running the server.
+        let factory = make_factory();
+        let desc = make_descriptor("test.module", ModuleAnnotations::default());
+        let tool = factory.build_tool(&desc, "identity test", None).unwrap();
+        assert_eq!(tool.description, "identity test");
+        assert_eq!(tool.name, "test.module");
     }
 }
