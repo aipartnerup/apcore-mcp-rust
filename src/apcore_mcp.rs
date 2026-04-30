@@ -1667,11 +1667,15 @@ pub fn serve(backend: impl Into<BackendSource>, config: ServeConfig) -> Result<(
             — use APCoreMCPBuilder::acl() directly"
         );
     }
-    if config.observability.is_some() {
-        tracing::warn!(
-            "ServeConfig.observability (serde_json::Value placeholder) is not yet wired \
-            — use APCoreMCPBuilder::observability() directly"
-        );
+    // observability — extract bool from `true`/`false` or `{ "enabled": bool }`
+    // shapes and forward to APCoreMCPBuilder::observability(bool). Matches
+    // apcore-mcp-python serve(observability: bool) parity. [D1-001]
+    if let Some(obs) = config.observability.as_ref() {
+        let enabled = obs
+            .as_bool()
+            .or_else(|| obs.get("enabled").and_then(|v| v.as_bool()))
+            .unwrap_or(true);
+        builder = builder.observability(enabled);
     }
 
     let mcp = builder.build()?;
@@ -1745,11 +1749,13 @@ pub async fn async_serve(
             — use APCoreMCPBuilder::acl() directly"
         );
     }
-    if config.observability.is_some() {
-        tracing::warn!(
-            "AsyncServeConfig.observability (serde_json::Value placeholder) is not yet wired \
-            — use APCoreMCPBuilder::observability() directly"
-        );
+    // observability — extract bool and forward; matches Python parity. [D1-002]
+    if let Some(obs) = config.observability.as_ref() {
+        let enabled = obs
+            .as_bool()
+            .or_else(|| obs.get("enabled").and_then(|v| v.as_bool()))
+            .unwrap_or(true);
+        builder = builder.observability(enabled);
     }
 
     let mcp = builder.build()?;
@@ -2912,6 +2918,28 @@ mod tests {
             &path_set,
             "exempt_paths must be stored after forwarding"
         );
+    }
+
+    #[test]
+    fn serve_config_observability_json_extraction() {
+        // [D1-001] serve()/async_serve() forward ServeConfig.observability to
+        // APCoreMCPBuilder::observability(bool). The placeholder field is JSON;
+        // the wiring extracts a bool from `true`/`false` literals or
+        // `{ "enabled": bool }` objects, defaulting to true on shape mismatch.
+        // This test exercises the extraction logic directly so a mistake here
+        // can be caught without spinning up the stdio serve loop.
+        fn extract(obs: &serde_json::Value) -> bool {
+            obs.as_bool()
+                .or_else(|| obs.get("enabled").and_then(|v| v.as_bool()))
+                .unwrap_or(true)
+        }
+        assert!(extract(&serde_json::json!(true)));
+        assert!(!extract(&serde_json::json!(false)));
+        assert!(extract(&serde_json::json!({"enabled": true})));
+        assert!(!extract(&serde_json::json!({"enabled": false})));
+        // Unknown shape → default on (presence implies user intent).
+        assert!(extract(&serde_json::json!({})));
+        assert!(extract(&serde_json::json!("yes")));
     }
 
     // ── Regression tests for Issues 2/5 & 4/5 (Ru-W1, Ru-W3) ─────────────────
