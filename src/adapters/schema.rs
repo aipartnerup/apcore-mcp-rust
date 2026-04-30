@@ -18,6 +18,22 @@ const MAX_REF_DEPTH: usize = 32;
 pub struct SchemaConverter;
 
 impl SchemaConverter {
+    /// Convert a module descriptor's input schema to an MCP tool input schema.
+    ///
+    /// Primary public API matching Python `convert_input_schema(descriptor)` and
+    /// TS `convertInputSchema(descriptor, options?)` — takes the full descriptor.
+    /// [D10-008]
+    ///
+    /// # Arguments
+    /// * `descriptor` — the apcore module descriptor.
+    /// * `strict` — if true, inject `additionalProperties: false` on all object nodes.
+    pub fn convert_input_schema_descriptor(
+        descriptor: &apcore::registry::ModuleDescriptor,
+        strict: bool,
+    ) -> Result<Value, AdapterError> {
+        Self::convert_input_schema_strict(&descriptor.input_schema, strict)
+    }
+
     /// Convert an apcore input schema to an MCP tool input schema.
     ///
     /// MCP requires `type: "object"` at the top level with explicit `properties`.
@@ -683,6 +699,39 @@ mod tests {
             }
             other => panic!("expected type to remain a list, got: {other:?}"),
         }
+    }
+
+    /// [D10-008] Descriptor-level API: convert_input_schema_descriptor takes
+    /// the full descriptor and reads descriptor.input_schema automatically.
+    #[test]
+    fn test_convert_input_schema_descriptor() {
+        use apcore::registry::ModuleDescriptor;
+        use std::collections::HashMap;
+        let descriptor = ModuleDescriptor {
+            module_id: "test.module".to_string(),
+            name: None,
+            description: "test".to_string(),
+            documentation: None,
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"}
+                }
+            }),
+            output_schema: json!({}),
+            version: "1.0.0".to_string(),
+            tags: vec![],
+            annotations: None,
+            examples: vec![],
+            metadata: HashMap::new(),
+            display: None,
+            sunset_date: None,
+            dependencies: vec![],
+            enabled: true,
+        };
+        let result = SchemaConverter::convert_input_schema_descriptor(&descriptor, false).unwrap();
+        assert_eq!(result["type"], "object");
+        assert_eq!(result["properties"]["name"]["type"], "string");
     }
 
     /// [SC-9] Regression: strict-mode injection must NOT descend into
