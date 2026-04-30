@@ -16,8 +16,9 @@ pub mod converters;
 pub mod explorer;
 pub mod helpers;
 /// Inspector sub-module — placeholder for future port from Python inspector/.
-/// [D8-004]
-pub mod inspector;
+/// Kept crate-private until F-039 (Schema Inspector) ships per PRD; promote to
+/// `pub mod` when the implementation lands.
+pub(crate) mod inspector;
 pub mod middleware_builder;
 pub mod server;
 /// Crate version, kept in sync with Cargo.toml.

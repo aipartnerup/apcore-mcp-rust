@@ -220,10 +220,7 @@ impl ErrorMapper {
                 .get("env_var")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            let message = format!(
-                "Configuration environment variable mapping conflict for '{}'",
-                detail_val
-            );
+            let message = format!("Config env map conflict: {}", detail_val);
             return build_detail_response(error, error_type, message);
         }
 
@@ -234,56 +231,22 @@ impl ErrorMapper {
                 .get("step")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            let message = format!("Pipeline aborted at step '{}'", detail_val);
+            let message = format!("Pipeline aborted at step: {}", detail_val);
             return build_detail_response(error, error_type, message);
         }
 
         // STEP_NOT_FOUND, VERSION_INCOMPATIBLE → handled by default passthrough below.
 
         // DependencyNotFound / DependencyVersionMismatch — apcore 0.19.0 §5.3 /
-        // §5.15.2. Emit a structured message so agents can react to missing /
-        // incompatible-version deps without parsing `details`.
-        if code == ApcoreErrorCode::DependencyNotFound {
-            let module_id = error
-                .details
-                .get("module_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let dep_id = error
-                .details
-                .get("dependency_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let message = format!(
-                "Module '{module_id}' requires dependency '{dep_id}', which is not registered"
-            );
-            return build_detail_response(error, error_type, message);
-        }
-        if code == ApcoreErrorCode::DependencyVersionMismatch {
-            let module_id = error
-                .details
-                .get("module_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let dep_id = error
-                .details
-                .get("dependency_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let required = error
-                .details
-                .get("required")
-                .and_then(|v| v.as_str())
-                .unwrap_or("<unspecified>");
-            let actual = error
-                .details
-                .get("actual")
-                .and_then(|v| v.as_str())
-                .unwrap_or("<unknown>");
-            let message = format!(
-                "Module '{module_id}' requires '{dep_id}' {required}, but registered version is {actual}"
-            );
-            return build_detail_response(error, error_type, message);
+        // §5.15.2. Pass `error.message` through verbatim to match
+        // apcore-mcp-python and apcore-mcp-typescript wire format. `details`
+        // remains in the response so callers can inspect `module_id`,
+        // `dependency_id`, `required`, and `actual` programmatically.
+        if matches!(
+            code,
+            ApcoreErrorCode::DependencyNotFound | ApcoreErrorCode::DependencyVersionMismatch
+        ) {
+            return build_detail_response(error, error_type, error.message.clone());
         }
 
         // apcore 0.19.0 binding-configuration errors: keep the original message

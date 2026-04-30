@@ -231,14 +231,33 @@ impl AsyncTaskBridge {
     /// Retrieve the current `TaskInfo` for a task id.
     ///
     /// When the task is in `Completed` state, the embedded `result` is
-    /// redacted via the module's registered output schema (if any).
+    /// redacted via the module's registered output schema (if any). If the
+    /// redactor panics, the unredacted result is returned and the panic is
+    /// logged at debug level — matches apcore-mcp-python and
+    /// apcore-mcp-typescript try/except behaviour.
     pub fn get_status(&self, task_id: &str) -> Option<TaskInfo> {
         let mut info = self.manager.get_status(task_id)?;
         if info.status == TaskStatus::Completed {
             if let Some(result) = &info.result {
                 if let Some(schema) = self.output_schemas.get(&info.module_id) {
-                    let redacted = apcore::redact_sensitive(result, schema);
-                    info.result = Some(redacted);
+                    // The apcore redactor is best-effort; if it panics we degrade
+                    // to the unredacted result rather than poisoning the response.
+                    let result_for_redact = result.clone();
+                    let schema_for_redact = schema.clone();
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                        apcore::redact_sensitive(&result_for_redact, &schema_for_redact)
+                    })) {
+                        Ok(redacted) => {
+                            info.result = Some(redacted);
+                        }
+                        Err(_) => {
+                            tracing::debug!(
+                                task_id = %task_id,
+                                module_id = %info.module_id,
+                                "task-result redactor panicked; falling back to unredacted result"
+                            );
+                        }
+                    }
                 }
             }
         }
