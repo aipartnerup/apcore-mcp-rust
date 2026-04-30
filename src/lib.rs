@@ -32,9 +32,8 @@ pub use crate::apcore_mcp::{async_serve, serve, to_openai_tools};
 
 // ---- Re-exports: auth -------------------------------------------------------
 pub use crate::auth::jwt::{ClaimMapping, JWTAuthenticator};
-pub use crate::auth::middleware::{
-    extract_headers, AuthMiddlewareLayer, AuthMiddlewareService, AUTH_IDENTITY,
-};
+// [D9-009] extract_headers is internal (pub(crate)) — not re-exported.
+pub use crate::auth::middleware::{AuthMiddlewareLayer, AuthMiddlewareService, AUTH_IDENTITY};
 pub use crate::auth::protocol::Authenticator;
 
 // ---- Re-exports: server -----------------------------------------------------

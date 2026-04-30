@@ -22,7 +22,10 @@ tokio::task_local! {
 }
 
 /// Extract headers from an HTTP request into a plain HashMap.
-pub fn extract_headers<B>(req: &Request<B>) -> HashMap<String, String> {
+///
+/// Internal helper used by [`AuthMiddlewareService`]. Not part of the public
+/// API — callers should not rely on this function. [D9-009]
+pub(crate) fn extract_headers<B>(req: &Request<B>) -> HashMap<String, String> {
     req.headers()
         .iter()
         .filter_map(|(name, value)| {

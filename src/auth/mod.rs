@@ -9,7 +9,8 @@ pub mod protocol;
 
 // ---- Re-exports: public API surface -----------------------------------------
 pub use jwt::{ClaimMapping, JWTAuthenticator};
-pub use middleware::{extract_headers, AuthMiddlewareLayer, AuthMiddlewareService, AUTH_IDENTITY};
+// [D9-009] extract_headers is pub(crate) — not exported as part of public API.
+pub use middleware::{AuthMiddlewareLayer, AuthMiddlewareService, AUTH_IDENTITY};
 pub use protocol::{Authenticator, Identity};
 
 #[cfg(test)]
