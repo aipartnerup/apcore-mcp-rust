@@ -47,6 +47,12 @@ pub struct JWTAuthenticator {
     issuer: Option<String>,
     claim_mapping: ClaimMapping,
     require_claims: Vec<String>,
+    /// Whether unauthenticated requests should be rejected at this authenticator.
+    ///
+    /// NOTE [D1-004]: Python delegates this policy to `AuthMiddleware` rather than
+    /// owning it on the authenticator. TypeScript and Rust own it on the authenticator
+    /// itself (consistent with each other). This is a known cross-language asymmetry,
+    /// documented here to aid future spec alignment.
     require_auth: bool,
 }
 
@@ -124,7 +130,28 @@ impl JWTAuthenticator {
             &self.key,
             &validation,
         ) {
-            Ok(token_data) => Some(token_data.claims),
+            Ok(token_data) => {
+                let claims = token_data.claims;
+                // [D11-006] Post-decode custom-claim enforcement.
+                // `set_required_spec_claims` only accepts known JWT spec claims
+                // (exp/nbf/iat/aud/iss/sub). Custom claims like "org_id" are
+                // silently ignored by jsonwebtoken. We enforce them here,
+                // matching Python+TS post-decode loops.
+                for required in &self.require_claims {
+                    // Only check claims not already validated by jsonwebtoken
+                    // (standard spec claims are handled above).
+                    const SPEC_CLAIMS: &[&str] = &["exp", "nbf", "iat", "aud", "iss", "sub"];
+                    if SPEC_CLAIMS.contains(&required.as_str()) {
+                        // Already enforced by jsonwebtoken above.
+                        continue;
+                    }
+                    if !claims.contains_key(required) {
+                        debug!("JWT missing required custom claim: {required}");
+                        return None;
+                    }
+                }
+                Some(claims)
+            }
             Err(e) => {
                 debug!("JWT validation failed: {e}");
                 None
@@ -143,6 +170,10 @@ impl JWTAuthenticator {
         let id = payload.get(&mapping.id_claim)?;
         let id = match id {
             serde_json::Value::String(s) => s.clone(),
+            // [D11-008] JSON null must short-circuit to None (no identity),
+            // not produce the string literal "null". Python short-circuits on
+            // None; TS checks rawId === null. Rust now aligns.
+            serde_json::Value::Null => return None,
             other => other.to_string(),
         };
 
@@ -596,6 +627,119 @@ mod tests {
         let headers = headers_with_token(&token);
         let result = auth.authenticate(&headers).await;
         assert!(result.is_none());
+    }
+
+    // -- Issue D11-006: custom require_claims enforced post-decode ----------
+
+    #[tokio::test]
+    async fn require_custom_claim_absent_returns_none() {
+        // [D11-006] Custom claim "org_id" is not enforced by jsonwebtoken's
+        // set_required_spec_claims. Post-decode loop must reject tokens lacking it.
+        let auth = JWTAuthenticator::new(
+            TEST_SECRET,
+            None,
+            None,
+            None,
+            None,
+            Some(vec!["sub".to_string(), "org_id".to_string()]),
+            None,
+        );
+        // Token WITHOUT org_id
+        let token = make_token(&serde_json::json!({"sub": "user-1"}));
+        let headers = headers_with_token(&token);
+        let result = auth.authenticate(&headers).await;
+        assert!(
+            result.is_none(),
+            "should reject token missing required custom claim 'org_id'"
+        );
+    }
+
+    #[tokio::test]
+    async fn require_custom_claim_present_succeeds() {
+        let auth = JWTAuthenticator::new(
+            TEST_SECRET,
+            None,
+            None,
+            None,
+            None,
+            Some(vec!["sub".to_string(), "org_id".to_string()]),
+            None,
+        );
+        let token = make_token(&serde_json::json!({"sub": "user-1", "org_id": "acme"}));
+        let headers = headers_with_token(&token);
+        let result = auth.authenticate(&headers).await;
+        assert!(
+            result.is_some(),
+            "should accept token with all required claims"
+        );
+    }
+
+    // -- Issue D11-008: JSON null sub → None, not "null" string ---------------
+
+    #[tokio::test]
+    async fn null_sub_claim_returns_none() {
+        // [D11-008] sub: null must return None, not Some(Identity{id: "null"}).
+        let auth = JWTAuthenticator::new(
+            TEST_SECRET,
+            None,
+            None,
+            None,
+            None,
+            Some(vec![]), // don't require "sub" so decode succeeds with null sub
+            None,
+        );
+        let token = make_token(&serde_json::json!({"sub": null}));
+        let headers = headers_with_token(&token);
+        let result = auth.authenticate(&headers).await;
+        assert!(
+            result.is_none(),
+            "null sub claim must return None, not Some(Identity{{id: \"null\"}})"
+        );
+    }
+
+    // -- Issue D11-009: null identity_type → "user" (documented behavior) ----
+
+    #[tokio::test]
+    async fn null_identity_type_falls_back_to_user() {
+        // [D11-009] type: null → identity_type == "user". Rust's
+        // .and_then(as_str).unwrap_or("user") handles null correctly since
+        // null.as_str() == None → unwrap_or("user"). This is the most
+        // defensive behavior and is intentional.
+        let auth = JWTAuthenticator::new(
+            TEST_SECRET,
+            None,
+            None,
+            None,
+            None,
+            Some(vec![]), // no required claims
+            None,
+        );
+        let token = make_token(&serde_json::json!({"sub": "user-1", "type": null}));
+        let headers = headers_with_token(&token);
+        let identity = auth.authenticate(&headers).await.unwrap();
+        assert_eq!(
+            identity.identity_type(),
+            "user",
+            "null type claim must fall back to 'user'"
+        );
+    }
+
+    // -- Issue D1-004: require_auth accessor (documented asymmetry) -----------
+
+    #[test]
+    fn require_auth_accessor_returns_value() {
+        // [D1-004] Rust owns require_auth on the authenticator (consistent with TS).
+        // Python delegates this policy to AuthMiddleware instead.
+        let auth = JWTAuthenticator::new(TEST_SECRET, None, None, None, None, None, Some(true));
+        assert!(
+            auth.require_auth(),
+            "require_auth() must return true when set to true"
+        );
+        let auth = JWTAuthenticator::new(TEST_SECRET, None, None, None, None, None, Some(false));
+        assert!(
+            !auth.require_auth(),
+            "require_auth() must return false when set to false"
+        );
     }
 
     #[tokio::test]
