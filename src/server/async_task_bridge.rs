@@ -31,10 +31,23 @@ use std::sync::{Arc, Mutex};
 use apcore::async_task::{AsyncTaskManager, TaskInfo, TaskStatus};
 use apcore::executor::Executor as ApcoreExecutor;
 use apcore::registry::registry::Registry;
+use apcore::registry::ModuleDescriptor;
 use apcore::{Context, Identity};
 use serde_json::{json, Value};
 
 use crate::server::types::Tool;
+
+/// Minimal submit result envelope returned by [`AsyncTaskBridge::submit`].
+///
+/// Matches the Python+TS protocol shape `{task_id, status: "pending"}`.
+/// [D10-003]
+#[derive(Debug, Clone)]
+pub struct SubmitResult {
+    /// The allocated task ID.
+    pub task_id: String,
+    /// Always `"pending"` at submit time.
+    pub status: String,
+}
 
 /// Reserved prefix for MCP meta-tools.
 pub const META_TOOL_PREFIX: &str = "__apcore_";
@@ -108,6 +121,15 @@ impl AsyncTaskBridge {
 
     /// Check whether a module descriptor is async-hinted.
     ///
+    /// Primary public API matching Python `is_async_module(descriptor)` and
+    /// TS `isAsyncModule(descriptor)` — takes the full descriptor. [D10-005]
+    pub fn is_async_module_descriptor(descriptor: &ModuleDescriptor) -> bool {
+        let extra = descriptor.annotations.as_ref().map(|a| &a.extra);
+        Self::is_async_module(&descriptor.metadata, extra)
+    }
+
+    /// Field-level async detection (internal). Prefer [`Self::is_async_module_descriptor`].
+    ///
     /// Async modules are those with:
     /// - `metadata.async == true`, or
     /// - `annotations.extra["mcp_async"] == "true"` (string or bool).
@@ -165,9 +187,14 @@ impl AsyncTaskBridge {
 
     /// Submit a module for asynchronous execution.
     ///
-    /// Returns the `TaskInfo` envelope on success, or a `ModuleError`
-    /// (mapped via the shared error formatter at the MCP boundary) on
-    /// capacity / validation failures.
+    /// Returns a `SubmitResult { task_id, status: "pending" }` envelope on
+    /// success, matching Python+TS's `{task_id, status: "pending"}` shape.
+    /// [D10-003]
+    ///
+    /// The `__apcore_*` reserved-id guard is NOT applied here; it belongs
+    /// exclusively in the `__apcore_task_submit` meta-tool handler so that
+    /// callers can call `submit()` directly without being blocked by the
+    /// meta-tool namespace enforcement. [D10-004]
     pub fn submit(
         &self,
         module_id: &str,
@@ -175,16 +202,7 @@ impl AsyncTaskBridge {
         identity: Option<Identity>,
         progress_token: Option<Value>,
         session_key: Option<&str>,
-    ) -> Result<TaskInfo, apcore::errors::ModuleError> {
-        if Self::is_reserved_id(module_id) {
-            return Err(apcore::errors::ModuleError::new(
-                apcore::errors::ErrorCode::GeneralInvalidInput,
-                format!(
-                    "module id '{module_id}' is reserved by the async task bridge (__apcore_ prefix)"
-                ),
-            ));
-        }
-
+    ) -> Result<SubmitResult, apcore::errors::ModuleError> {
         let ctx: Option<Context<Value>> = identity.map(Context::new);
         let task_id = self.manager.submit(module_id, inputs, ctx)?;
 
@@ -204,11 +222,9 @@ impl AsyncTaskBridge {
                 .push(task_id.clone());
         }
 
-        self.manager.get_status(&task_id).ok_or_else(|| {
-            apcore::errors::ModuleError::new(
-                apcore::errors::ErrorCode::GeneralInternalError,
-                format!("task {task_id} was submitted but disappeared from the manager"),
-            )
+        Ok(SubmitResult {
+            task_id,
+            status: "pending".to_string(),
         })
     }
 
@@ -383,6 +399,19 @@ impl AsyncTaskBridge {
                     "__apcore_task_submit requires 'module_id'",
                 )
             })?;
+
+        // [D10-004] Reserved-id guard belongs here in the meta-tool handler,
+        // not in submit(). Python+TS only enforce this in the meta-tool handler
+        // so that submit() can be called directly without restriction.
+        if Self::is_reserved_id(module_id) {
+            return Err(apcore::errors::ModuleError::new(
+                apcore::errors::ErrorCode::GeneralInvalidInput,
+                format!(
+                    "module id '{module_id}' is reserved by the async task bridge (__apcore_ prefix)"
+                ),
+            ));
+        }
+
         // Spec rule: __apcore_task_submit against a non-async module returns
         // ASYNC_MODULE_NOT_ASYNC. Python enforces this; TS+Rust were
         // previously skipping the check and silently wrapping sync-only
@@ -398,15 +427,12 @@ impl AsyncTaskBridge {
             ));
         }
         let inputs = arguments.get("arguments").cloned().unwrap_or(json!({}));
-        let info = self.submit(module_id, inputs, identity, progress_token, session_key)?;
-        // Return the spec-mandated envelope `{task_id, status: "pending"}` —
-        // not the full TaskInfo. Python and TypeScript both return exactly
-        // this shape; serializing TaskInfo would leak module_id/timestamps
-        // and may report a non-pending status if the task already started
-        // between submit() and get_status(). [A-D-007]
+        // submit() now returns SubmitResult{task_id, status} — the exact
+        // envelope shape Python+TS return. [D10-003]
+        let result = self.submit(module_id, inputs, identity, progress_token, session_key)?;
         Ok(json!({
-            "task_id": info.task_id,
-            "status": "pending",
+            "task_id": result.task_id,
+            "status": result.status,
         }))
     }
 
@@ -422,18 +448,16 @@ impl AsyncTaskBridge {
             })?;
         match self.get_status(task_id) {
             Some(info) => Ok(serde_json::to_value(info).unwrap_or(Value::Null)),
-            // Spec uses ASYNC_TASK_NOT_FOUND for missing task ids, not
-            // ModuleNotFound (which means "module by that id not in
-            // registry"). Encode the spec code in the message so the
-            // ErrorMapper / clients can recognize it. apcore does not
-            // expose a dedicated ErrorCode variant for this; using
-            // GeneralInvalidInput keeps the error class within apcore's
-            // error hierarchy without introducing a cross-repo change.
-            // [A-D-017]
-            None => Err(apcore::errors::ModuleError::new(
-                apcore::errors::ErrorCode::GeneralInvalidInput,
-                format!("ASYNC_TASK_NOT_FOUND: task not found: {task_id}"),
-            )),
+            // [D11-014] Align with Python's `_text_response({"error":
+            // "ASYNC_TASK_NOT_FOUND", "task_id": ...}, is_error=True)` — return
+            // Ok(json_envelope) with an error payload rather than Err(...).
+            // This keeps the MCP response layer consistent: the router receives
+            // Ok and can set `is_error: true` on the content item.
+            None => Ok(json!({
+                "error": "ASYNC_TASK_NOT_FOUND",
+                "task_id": task_id,
+                "is_error": true,
+            })),
         }
     }
 
@@ -601,26 +625,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submit_rejects_reserved_id() {
+    async fn submit_reserved_id_succeeds_direct() {
+        // [D10-004] The reserved-id guard was moved from submit() to the
+        // meta-tool handler. Calling submit() directly with a reserved id
+        // must SUCCEED (no GeneralInvalidInput from submit itself).
         let bridge = AsyncTaskBridge::new(make_executor());
-        let err = bridge
-            .submit("__apcore_task_submit", json!({}), None, None, None)
-            .unwrap_err();
-        assert_eq!(err.code, apcore::errors::ErrorCode::GeneralInvalidInput);
+        let result = bridge.submit("__apcore_task_submit", json!({}), None, None, None);
+        // The manager will reject it internally (unknown module), but that's
+        // a different error path — NOT a GeneralInvalidInput from the bridge.
+        // If it errors, it must NOT be the bridge's reserved-id check.
+        if let Err(e) = &result {
+            assert!(
+                !e.to_string().contains("reserved by the async task bridge"),
+                "submit() must not reject reserved ids; that belongs in handle_submit. Got: {e}"
+            );
+        }
     }
 
     #[tokio::test]
-    async fn submit_returns_task_info() {
+    async fn submit_returns_submit_result_with_pending_status() {
+        // [D10-003] submit() must return SubmitResult{task_id, status:"pending"}
+        // not the full TaskInfo.
         let bridge = AsyncTaskBridge::new(make_executor());
-        let info = bridge
+        let result = bridge
             .submit("some.module", json!({}), None, None, None)
             .expect("submit should succeed");
-        assert_eq!(info.module_id, "some.module");
-        // status is either Pending or has already transitioned
-        assert!(matches!(
-            info.status,
-            TaskStatus::Pending | TaskStatus::Running | TaskStatus::Failed
-        ));
+        assert!(!result.task_id.is_empty(), "task_id must be non-empty");
+        assert_eq!(result.status, "pending", "status must always be 'pending'");
     }
 
     #[tokio::test]
@@ -784,5 +815,103 @@ mod tests {
         let bridge = AsyncTaskBridge::new(make_executor());
         let res = bridge.handle_meta_tool("math.add", &json!({}), None, None, None);
         assert!(res.is_none());
+    }
+
+    // -- Issue D10-004: meta-tool handler still rejects __apcore_* ids -------
+
+    #[tokio::test]
+    async fn meta_tool_handler_rejects_reserved_id() {
+        // [D10-004] The reserved-id check belongs in the meta-tool handler.
+        let bridge = AsyncTaskBridge::new(make_executor());
+        let result = bridge.handle_meta_tool(
+            META_TOOL_SUBMIT,
+            &json!({"module_id": "__apcore_task_submit", "arguments": {}}),
+            None,
+            None,
+            None,
+        );
+        let inner = result.expect("meta-tool must be routed");
+        let err = inner.expect_err("meta-tool submit must reject __apcore_ module_id");
+        assert!(
+            err.to_string().contains("reserved"),
+            "error must mention reserved: {err}"
+        );
+    }
+
+    // -- Issue D10-005: is_async_module_descriptor facade --------------------
+
+    #[test]
+    fn is_async_module_descriptor_detects_async_in_metadata() {
+        // [D10-005] Primary public API takes the full descriptor.
+        let mut metadata = HashMap::new();
+        metadata.insert("async".to_string(), json!(true));
+        let descriptor = apcore::registry::ModuleDescriptor {
+            module_id: "test.module".to_string(),
+            name: None,
+            description: "test".to_string(),
+            documentation: None,
+            input_schema: json!({}),
+            output_schema: json!({}),
+            version: "1.0.0".to_string(),
+            tags: vec![],
+            annotations: None,
+            examples: vec![],
+            metadata,
+            display: None,
+            sunset_date: None,
+            dependencies: vec![],
+            enabled: true,
+        };
+        assert!(AsyncTaskBridge::is_async_module_descriptor(&descriptor));
+    }
+
+    #[test]
+    fn is_async_module_descriptor_returns_false_for_sync() {
+        let descriptor = apcore::registry::ModuleDescriptor {
+            module_id: "test.module".to_string(),
+            name: None,
+            description: "test".to_string(),
+            documentation: None,
+            input_schema: json!({}),
+            output_schema: json!({}),
+            version: "1.0.0".to_string(),
+            tags: vec![],
+            annotations: None,
+            examples: vec![],
+            metadata: HashMap::new(),
+            display: None,
+            sunset_date: None,
+            dependencies: vec![],
+            enabled: true,
+        };
+        assert!(!AsyncTaskBridge::is_async_module_descriptor(&descriptor));
+    }
+
+    // -- Issue D11-014: handle_status not-found returns Ok(json) not Err -----
+
+    #[tokio::test]
+    async fn handle_status_unknown_task_returns_ok_json_error() {
+        // [D11-014] Python returns _text_response({error:ASYNC_TASK_NOT_FOUND,task_id:...})
+        // TS throws. Rust must return Ok(json) not Err, aligning with Python.
+        let bridge = AsyncTaskBridge::new(make_executor());
+        let result = bridge.handle_meta_tool(
+            META_TOOL_STATUS,
+            &json!({"task_id": "nonexistent-task-id"}),
+            None,
+            None,
+            None,
+        );
+        let inner = result.expect("meta-tool must be routed");
+        let val = inner.expect("handle_status must return Ok, not Err, for unknown task");
+        assert_eq!(
+            val.get("error").and_then(|v| v.as_str()),
+            Some("ASYNC_TASK_NOT_FOUND"),
+            "error field must be ASYNC_TASK_NOT_FOUND; got: {val:?}"
+        );
+        assert_eq!(
+            val.get("task_id").and_then(|v| v.as_str()),
+            Some("nonexistent-task-id"),
+            "task_id must be echoed in the error envelope"
+        );
     }
 }
