@@ -112,22 +112,25 @@ impl AnnotationMapper {
             parts.push(format!("pagination_style={}", annotations.pagination_style));
         }
 
-        // F-041 annotation metadata passthrough: surface any `mcp_` prefixed
-        // extension keys from `annotations.extra` verbatim. Keys are sorted so
-        // the rendered block is stable across runs. Values are formatted with
-        // `serde_json::Value::to_string` which handles scalars and JSON fragments
-        // identically.
+        // F-041 / D11-021 annotation metadata passthrough: surface any `mcp_`
+        // prefixed extension keys from `annotations.extra`. Keys are sorted so
+        // the rendered output is stable across runs.
+        //
+        // [D11-021] Align with Python's canonical format:
+        //   1. Strip the `mcp_` prefix from keys.
+        //   2. Format as `{stripped}: {value}` (colon+space separator, not equals).
+        //   3. Emit each stripped extra as its own SEPARATE section OUTSIDE
+        //      the `[Annotations: ...]` block, joined by `\n\n`.
+        // This differs from the previous Rust format (key=value inside
+        // [Annotations:...]) and from TS (joined by \n in one block).
         let mut mcp_extras: Vec<(&String, &serde_json::Value)> = annotations
             .extra
             .iter()
             .filter(|(k, _)| k.starts_with("mcp_"))
             .collect();
         mcp_extras.sort_by(|a, b| a.0.cmp(b.0));
-        for (k, v) in mcp_extras {
-            parts.push(format!("{}={}", k, v));
-        }
 
-        if warnings.is_empty() && parts.is_empty() {
+        if warnings.is_empty() && parts.is_empty() && mcp_extras.is_empty() {
             return String::new();
         }
 
@@ -137,6 +140,17 @@ impl AnnotationMapper {
         }
         if !parts.is_empty() {
             sections.push(format!("[Annotations: {}]", parts.join(", ")));
+        }
+        // Each mcp_ extra is its own paragraph-level section, outside [Annotations:].
+        for (k, v) in &mcp_extras {
+            let stripped = k.strip_prefix("mcp_").unwrap_or(k);
+            // Use as_str() for string values to avoid JSON quote wrapping;
+            // fall back to to_string() for non-string JSON values.
+            let formatted_val = v
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| v.to_string());
+            sections.push(format!("{stripped}: {formatted_val}"));
         }
 
         format!("\n\n{}", sections.join("\n\n"))
@@ -294,6 +308,75 @@ mod tests {
         assert!(result.contains("requires_approval=true"));
         // Verify it starts with \n\n
         assert!(result.starts_with("\n\n"));
+    }
+
+    // -- D11-021: mcp_extras format aligned with Python ---------------------
+
+    #[test]
+    fn test_mcp_extras_stripped_key_and_colon_format() {
+        // [D11-021] mcp_ prefix must be stripped, separator is ": " not "=",
+        // each extra is its own section outside [Annotations: ...].
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("mcp_cost_usd".to_string(), serde_json::json!("0.01"));
+        extra.insert("mcp_model".to_string(), serde_json::json!("gpt-4"));
+        let ann = ModuleAnnotations {
+            extra,
+            ..Default::default()
+        };
+        let result = AnnotationMapper::to_description_suffix(Some(&ann));
+        assert!(
+            result.contains("cost_usd: 0.01"),
+            "must strip mcp_ prefix and use ': ' separator; got: {result:?}"
+        );
+        assert!(
+            result.contains("model: gpt-4"),
+            "must strip mcp_ prefix and use ': ' separator; got: {result:?}"
+        );
+        // Must NOT be inside [Annotations: ...]
+        // Check that the extras appear AFTER any annotation block or standalone
+        assert!(
+            !result.contains("mcp_cost_usd"),
+            "mcp_ prefix must be stripped; got: {result:?}"
+        );
+        assert!(
+            !result.contains("mcp_model"),
+            "mcp_ prefix must be stripped; got: {result:?}"
+        );
+        // Each extra must be a separate section (joined by \n\n not \n)
+        let cost_pos = result.find("cost_usd:").unwrap();
+        let model_pos = result.find("model:").unwrap();
+        let between = &result[cost_pos.min(model_pos)..cost_pos.max(model_pos)];
+        assert!(
+            between.contains("\n\n"),
+            "each mcp extra must be a separate section joined by \\n\\n; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_mcp_extras_not_inside_annotations_block() {
+        // [D11-021] mcp_ extras must be OUTSIDE [Annotations: ...] block.
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("mcp_hint".to_string(), serde_json::json!("use sparingly"));
+        let ann = ModuleAnnotations {
+            readonly: true, // triggers [Annotations:] block
+            extra,
+            ..Default::default()
+        };
+        let result = AnnotationMapper::to_description_suffix(Some(&ann));
+        // [Annotations:] block must be present for readonly
+        assert!(result.contains("[Annotations:"));
+        // hint: use sparingly must NOT be inside the [Annotations: ...] brackets
+        if let (Some(ann_start), Some(ann_end)) = (result.find("[Annotations:"), result.find(']')) {
+            let ann_block = &result[ann_start..=ann_end];
+            assert!(
+                !ann_block.contains("hint:"),
+                "mcp_ extras must be outside [Annotations: ...]; got block: {ann_block:?}"
+            );
+        }
+        assert!(
+            result.contains("hint: use sparingly"),
+            "stripped extra must appear in result; got: {result:?}"
+        );
     }
 
     // ---- has_requires_approval tests ----
