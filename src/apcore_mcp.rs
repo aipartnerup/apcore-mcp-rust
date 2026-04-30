@@ -1374,7 +1374,11 @@ impl APCoreMCPBuilder {
 // ---- Top-level convenience functions ----------------------------------------
 
 /// Configuration for the convenience [`serve`] function.
-#[derive(Debug, Clone)]
+///
+/// Extended to cover the key fields from Python's `serve()` signature.
+/// Fields with no direct Rust type use `Option<serde_json::Value>` as
+/// a placeholder with a TODO comment. [D1-001]
+#[derive(Clone)]
 pub struct ServeConfig {
     /// MCP server name.
     pub name: String,
@@ -1396,6 +1400,45 @@ pub struct ServeConfig {
     pub validate_inputs: bool,
     /// Pipeline execution strategy preset.
     pub strategy: Option<String>,
+    // ---- Fields added for Python parity [D1-001] ----------------------------
+    /// JWT authenticator for HTTP transports.
+    pub authenticator: Option<std::sync::Arc<dyn crate::auth::protocol::Authenticator>>,
+    /// Whether authentication is required (forwarded to authenticator/middleware).
+    pub require_auth: Option<bool>,
+    /// HTTP paths that bypass authentication.
+    pub exempt_paths: Option<Vec<String>>,
+    /// Approval handler for destructive operations.
+    /// TODO: use `Option<Box<dyn ApprovalHandler>>` when trait is object-safe.
+    pub approval_handler: Option<serde_json::Value>,
+    /// Output formatter override.
+    /// TODO: use `Option<Box<dyn OutputFormatter>>` once the trait is defined.
+    pub output_formatter: Option<serde_json::Value>,
+    /// Whether to redact sensitive fields from output.
+    pub redact_output: Option<bool>,
+    /// Extra middleware layers.
+    /// TODO: type as `Option<Vec<Box<dyn tower::Layer<...>>>>` when tower Layer is object-safe.
+    pub middleware: Option<serde_json::Value>,
+    /// ACL configuration JSON.
+    pub acl: Option<serde_json::Value>,
+    /// Observability configuration.
+    pub observability: Option<serde_json::Value>,
+    /// Enable async task bridge.
+    pub async_tasks: Option<bool>,
+    /// Maximum concurrent async tasks.
+    pub async_max_concurrent: Option<usize>,
+    /// Schema converter override.
+    pub schema_converter: Option<serde_json::Value>,
+    /// Annotation mapper override.
+    pub annotation_mapper: Option<serde_json::Value>,
+    /// Error mapper override.
+    pub error_mapper: Option<serde_json::Value>,
+    /// On-startup callback (called before server starts accepting requests).
+    /// TODO: use `Option<Box<dyn Fn() + Send + Sync>>` when lifecycle hooks are wired.
+    pub on_startup: Option<serde_json::Value>,
+    /// On-shutdown callback (called when server stops).
+    pub on_shutdown: Option<serde_json::Value>,
+    /// Metrics collector override.
+    pub metrics_collector: Option<serde_json::Value>,
 }
 
 impl Default for ServeConfig {
@@ -1411,12 +1454,31 @@ impl Default for ServeConfig {
             log_level: None,
             validate_inputs: false,
             strategy: None,
+            authenticator: None,
+            require_auth: None,
+            exempt_paths: None,
+            approval_handler: None,
+            output_formatter: None,
+            redact_output: None,
+            middleware: None,
+            acl: None,
+            observability: None,
+            async_tasks: None,
+            async_max_concurrent: None,
+            schema_converter: None,
+            annotation_mapper: None,
+            error_mapper: None,
+            on_startup: None,
+            on_shutdown: None,
+            metrics_collector: None,
         }
     }
 }
 
 /// Configuration for the convenience [`async_serve`] function.
-#[derive(Debug, Clone)]
+///
+/// Extended to mirror Python's `async_serve()` signature (~25 fields). [D1-002]
+#[derive(Clone)]
 pub struct AsyncServeConfig {
     /// MCP server name.
     pub name: String,
@@ -1432,6 +1494,41 @@ pub struct AsyncServeConfig {
     pub validate_inputs: bool,
     /// Pipeline execution strategy preset.
     pub strategy: Option<String>,
+    // ---- Fields added for Python parity [D1-002] ----------------------------
+    /// JWT authenticator for HTTP transports.
+    pub authenticator: Option<std::sync::Arc<dyn crate::auth::protocol::Authenticator>>,
+    /// Whether authentication is required.
+    pub require_auth: Option<bool>,
+    /// HTTP paths that bypass authentication.
+    pub exempt_paths: Option<Vec<String>>,
+    /// Approval handler for destructive operations.
+    pub approval_handler: Option<serde_json::Value>,
+    /// Output formatter override.
+    pub output_formatter: Option<serde_json::Value>,
+    /// Whether to redact sensitive fields from output.
+    pub redact_output: Option<bool>,
+    /// ACL configuration JSON.
+    pub acl: Option<serde_json::Value>,
+    /// Observability configuration.
+    pub observability: Option<serde_json::Value>,
+    /// Enable async task bridge.
+    pub async_tasks: Option<bool>,
+    /// Maximum concurrent async tasks.
+    pub async_max_concurrent: Option<usize>,
+    /// Schema converter override.
+    pub schema_converter: Option<serde_json::Value>,
+    /// Annotation mapper override.
+    pub annotation_mapper: Option<serde_json::Value>,
+    /// Error mapper override.
+    pub error_mapper: Option<serde_json::Value>,
+    /// On-startup callback.
+    pub on_startup: Option<serde_json::Value>,
+    /// On-shutdown callback.
+    pub on_shutdown: Option<serde_json::Value>,
+    /// Metrics collector override.
+    pub metrics_collector: Option<serde_json::Value>,
+    /// Extra middleware layers.
+    pub middleware: Option<serde_json::Value>,
 }
 
 impl Default for AsyncServeConfig {
@@ -1444,6 +1541,23 @@ impl Default for AsyncServeConfig {
             log_level: None,
             validate_inputs: false,
             strategy: None,
+            authenticator: None,
+            require_auth: None,
+            exempt_paths: None,
+            approval_handler: None,
+            output_formatter: None,
+            redact_output: None,
+            acl: None,
+            observability: None,
+            async_tasks: None,
+            async_max_concurrent: None,
+            schema_converter: None,
+            annotation_mapper: None,
+            error_mapper: None,
+            on_startup: None,
+            on_shutdown: None,
+            metrics_collector: None,
+            middleware: None,
         }
     }
 }
@@ -2500,5 +2614,73 @@ mod tests {
         let usage = mcp.auto_usage.as_ref().unwrap();
         let summary = usage.export_json();
         assert!(summary.get("modules").is_some());
+    }
+
+    // -- Issue D1-001: ServeConfig has extended fields -------------------------
+
+    #[test]
+    fn test_serve_config_default_has_all_fields() {
+        // [D1-001] ServeConfig must have the key Python parity fields.
+        let cfg = ServeConfig::default();
+        assert_eq!(cfg.name, "apcore-mcp");
+        assert!(cfg.authenticator.is_none());
+        assert!(cfg.require_auth.is_none());
+        assert!(cfg.exempt_paths.is_none());
+        assert!(cfg.approval_handler.is_none());
+        assert!(cfg.redact_output.is_none());
+        assert!(cfg.async_tasks.is_none());
+        assert!(cfg.on_startup.is_none());
+        assert!(cfg.on_shutdown.is_none());
+        assert!(cfg.metrics_collector.is_none());
+    }
+
+    #[test]
+    fn test_serve_config_with_authenticator() {
+        // [D1-001] ServeConfig must accept an authenticator field.
+        use crate::auth::jwt::JWTAuthenticator;
+        let auth: std::sync::Arc<dyn crate::auth::protocol::Authenticator> = std::sync::Arc::new(
+            JWTAuthenticator::new("test-secret", None, None, None, None, None, Some(true)),
+        );
+        let cfg = ServeConfig {
+            name: "test".to_string(),
+            authenticator: Some(auth),
+            ..ServeConfig::default()
+        };
+        assert_eq!(cfg.name, "test");
+        assert!(cfg.authenticator.is_some());
+    }
+
+    // -- Issue D1-002: AsyncServeConfig has extended fields -------------------
+
+    #[test]
+    fn test_async_serve_config_default_has_all_fields() {
+        // [D1-002] AsyncServeConfig must have the key Python parity fields.
+        let cfg = AsyncServeConfig::default();
+        assert_eq!(cfg.name, "apcore-mcp");
+        assert!(cfg.authenticator.is_none());
+        assert!(cfg.require_auth.is_none());
+        assert!(cfg.exempt_paths.is_none());
+        assert!(cfg.async_tasks.is_none());
+        assert!(cfg.async_max_concurrent.is_none());
+        assert!(cfg.on_startup.is_none());
+        assert!(cfg.on_shutdown.is_none());
+    }
+
+    #[test]
+    fn test_async_serve_config_with_authenticator() {
+        // [D1-002] AsyncServeConfig must accept an authenticator field.
+        use crate::auth::jwt::JWTAuthenticator;
+        let auth: std::sync::Arc<dyn crate::auth::protocol::Authenticator> = std::sync::Arc::new(
+            JWTAuthenticator::new("test-secret", None, None, None, None, None, Some(false)),
+        );
+        let cfg = AsyncServeConfig {
+            name: "async-test".to_string(),
+            authenticator: Some(auth),
+            require_auth: Some(false),
+            ..AsyncServeConfig::default()
+        };
+        assert_eq!(cfg.name, "async-test");
+        assert!(cfg.authenticator.is_some());
+        assert_eq!(cfg.require_auth, Some(false));
     }
 }
