@@ -17,8 +17,6 @@ pub mod explorer;
 pub mod helpers;
 pub mod middleware_builder;
 pub mod server;
-mod utils;
-
 /// Crate version, kept in sync with Cargo.toml.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
