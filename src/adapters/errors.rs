@@ -45,6 +45,31 @@ pub struct McpErrorResponse {
 pub struct ErrorMapper;
 
 impl ErrorMapper {
+    /// Convert any [`std::error::Error`] into an [`McpErrorResponse`].
+    ///
+    /// Attempts to downcast to [`ModuleError`] and delegates to the typed
+    /// [`Self::to_mcp_error`] fast path. Unknown error types are mapped to an
+    /// `INTERNAL_ERROR` envelope, matching Python+TS fallback behavior. [D10-009]
+    ///
+    /// Note: downcast requires `'static` — the bound is placed on this signature.
+    pub fn to_mcp_error_any(err: &(dyn std::error::Error + 'static)) -> McpErrorResponse {
+        // Attempt fast-path downcast to ModuleError
+        if let Some(module_err) = err.downcast_ref::<ModuleError>() {
+            return Self::to_mcp_error(module_err);
+        }
+        // Unknown error type → INTERNAL_ERROR, no details (avoid leaking impl)
+        McpErrorResponse {
+            is_error: true,
+            error_type: "INTERNAL_ERROR".to_string(),
+            message: "Internal error occurred".to_string(),
+            details: None,
+            retryable: None,
+            ai_guidance: None,
+            user_fixable: None,
+            suggestion: None,
+        }
+    }
+
     /// Convert an apcore [`ModuleError`] into an [`McpErrorResponse`].
     ///
     /// Internal errors are sanitized to avoid leaking implementation details.
@@ -723,5 +748,28 @@ mod tests {
         assert!(json.get("error_type").is_none());
         assert!(json.get("ai_guidance").is_none());
         assert!(json.get("user_fixable").is_none());
+    }
+
+    // ---- to_mcp_error_any ----
+
+    #[test]
+    fn test_to_mcp_error_any_with_io_error_returns_internal_error() {
+        // [D10-009] Arbitrary errors (not ModuleError) must fall back to INTERNAL_ERROR.
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+        let resp = ErrorMapper::to_mcp_error_any(&io_err);
+        assert!(resp.is_error);
+        assert_eq!(resp.error_type, "INTERNAL_ERROR");
+        assert_eq!(resp.message, "Internal error occurred");
+        assert!(resp.details.is_none());
+    }
+
+    #[test]
+    fn test_to_mcp_error_any_with_module_error_delegates() {
+        // [D10-009] When the error IS a ModuleError, to_mcp_error_any delegates to to_mcp_error.
+        let module_err = ModuleError::new(ApcoreErrorCode::ModuleNotFound, "no such module");
+        let resp_typed = ErrorMapper::to_mcp_error(&module_err);
+        let resp_any = ErrorMapper::to_mcp_error_any(&module_err);
+        assert_eq!(resp_typed.error_type, resp_any.error_type);
+        assert_eq!(resp_typed.message, resp_any.message);
     }
 }
