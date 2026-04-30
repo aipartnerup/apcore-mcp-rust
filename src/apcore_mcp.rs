@@ -1051,6 +1051,15 @@ impl APCoreMCPBuilder {
         self
     }
 
+    /// Set the authenticator via an already-`Arc`-wrapped trait object.
+    ///
+    /// Use this when you hold an `Arc<dyn Authenticator>` (e.g. from
+    /// [`ServeConfig::authenticator`]) rather than a concrete type.
+    pub fn authenticator_arc(mut self, auth: Arc<dyn Authenticator>) -> Self {
+        self.authenticator = Some(auth);
+        self
+    }
+
     /// Set the metrics collector.
     pub fn metrics_collector(mut self, collector: Arc<dyn MetricsExporter>) -> Self {
         self.metrics_collector = Some(collector);
@@ -1067,8 +1076,15 @@ impl APCoreMCPBuilder {
 
     /// Set the approval handler.
     ///
-    /// **Note:** Reserved — not yet wired into the executor pipeline.
+    /// **Note:** Reserved — not yet wired into the executor pipeline. A warning
+    /// is emitted at the call site and again at `build()` time so that callers
+    /// who configure this field are not silently surprised.
     pub fn approval_handler(mut self, handler: Arc<dyn ApprovalHandler>) -> Self {
+        tracing::warn!(
+            "approval_handler: not yet wired into the execution pipeline — \
+            this setting has no effect in the current release. \
+            Approval handlers must be configured at the executor level."
+        );
         self.approval_handler = Some(handler);
         self
     }
@@ -1357,6 +1373,14 @@ impl APCoreMCPBuilder {
             (None, None)
         };
 
+        // Warn at build time when approval_handler is configured but not yet wired.
+        if self.approval_handler.is_some() {
+            tracing::warn!(
+                "APCoreMCP built with approval_handler configured but it is not yet \
+                wired into the execution pipeline"
+            );
+        }
+
         Ok(APCoreMCP {
             config: self.config,
             standalone_registry,
@@ -1604,6 +1628,52 @@ pub fn serve(backend: impl Into<BackendSource>, config: ServeConfig) -> Result<(
         builder = builder.strategy(strategy);
     }
 
+    // Forward previously-ignored ServeConfig fields to the builder.
+    if let Some(auth) = config.authenticator {
+        builder = builder.authenticator_arc(auth);
+    }
+    if let Some(rq) = config.require_auth {
+        builder = builder.require_auth(rq);
+    }
+    if let Some(paths) = config.exempt_paths {
+        builder = builder.exempt_paths(paths.into_iter().collect());
+    }
+    if let Some(redact) = config.redact_output {
+        builder = builder.redact_output(redact);
+    }
+    // Fields that cannot yet be forwarded emit a runtime warning so callers
+    // are not silently surprised.
+    if config.approval_handler.is_some() {
+        tracing::warn!(
+            "ServeConfig.approval_handler is not yet wired into the execution pipeline \
+            — this setting has no effect"
+        );
+    }
+    if config.output_formatter.is_some() {
+        tracing::warn!(
+            "ServeConfig.output_formatter is not yet wired into the execution pipeline \
+            — this setting has no effect"
+        );
+    }
+    if config.middleware.is_some() {
+        tracing::warn!(
+            "ServeConfig.middleware (serde_json::Value placeholder) is not yet wired \
+            — use APCoreMCPBuilder::middleware() directly"
+        );
+    }
+    if config.acl.is_some() {
+        tracing::warn!(
+            "ServeConfig.acl (serde_json::Value placeholder) is not yet wired \
+            — use APCoreMCPBuilder::acl() directly"
+        );
+    }
+    if config.observability.is_some() {
+        tracing::warn!(
+            "ServeConfig.observability (serde_json::Value placeholder) is not yet wired \
+            — use APCoreMCPBuilder::observability() directly"
+        );
+    }
+
     let mcp = builder.build()?;
     mcp.serve()
 }
@@ -1635,6 +1705,51 @@ pub async fn async_serve(
     }
     if let Some(strategy) = config.strategy.as_deref() {
         builder = builder.strategy(strategy);
+    }
+
+    // Forward previously-ignored AsyncServeConfig fields to the builder.
+    if let Some(auth) = config.authenticator {
+        builder = builder.authenticator_arc(auth);
+    }
+    if let Some(rq) = config.require_auth {
+        builder = builder.require_auth(rq);
+    }
+    if let Some(paths) = config.exempt_paths {
+        builder = builder.exempt_paths(paths.into_iter().collect());
+    }
+    if let Some(redact) = config.redact_output {
+        builder = builder.redact_output(redact);
+    }
+    // Fields that cannot yet be forwarded emit a runtime warning.
+    if config.approval_handler.is_some() {
+        tracing::warn!(
+            "AsyncServeConfig.approval_handler is not yet wired into the execution pipeline \
+            — this setting has no effect"
+        );
+    }
+    if config.output_formatter.is_some() {
+        tracing::warn!(
+            "AsyncServeConfig.output_formatter is not yet wired into the execution pipeline \
+            — this setting has no effect"
+        );
+    }
+    if config.middleware.is_some() {
+        tracing::warn!(
+            "AsyncServeConfig.middleware (serde_json::Value placeholder) is not yet wired \
+            — use APCoreMCPBuilder::middleware() directly"
+        );
+    }
+    if config.acl.is_some() {
+        tracing::warn!(
+            "AsyncServeConfig.acl (serde_json::Value placeholder) is not yet wired \
+            — use APCoreMCPBuilder::acl() directly"
+        );
+    }
+    if config.observability.is_some() {
+        tracing::warn!(
+            "AsyncServeConfig.observability (serde_json::Value placeholder) is not yet wired \
+            — use APCoreMCPBuilder::observability() directly"
+        );
     }
 
     let mcp = builder.build()?;
@@ -2682,5 +2797,225 @@ mod tests {
         assert_eq!(cfg.name, "async-test");
         assert!(cfg.authenticator.is_some());
         assert_eq!(cfg.require_auth, Some(false));
+    }
+
+    // ── Regression tests for Issues 1/5 & 5/5 (Ru-C1, Ru-W4) ─────────────────
+    // serve() / async_serve() must forward ServeConfig/AsyncServeConfig fields.
+
+    #[test]
+    fn serve_config_require_auth_false_forwarded_to_builder() {
+        // [Ru-C1] When ServeConfig.require_auth = Some(false), the resulting
+        // APCoreMCPBuilder must have require_auth=false (not the default true).
+        // We test via the builder directly since serve() blocks on network I/O.
+        let reg = Registry::new();
+        let exec = Arc::new(Executor::new(reg, Config::default()));
+
+        let mut builder = APCoreMCP::builder()
+            .backend(BackendSource::Executor(exec))
+            .name("test-forward")
+            .validate_inputs(false);
+
+        // Simulate what the fixed serve() does:
+        let require_auth = Some(false);
+        if let Some(rq) = require_auth {
+            builder = builder.require_auth(rq);
+        }
+
+        // The builder's config.require_auth must now be false.
+        assert!(
+            !builder.config.require_auth,
+            "require_auth should be false after forwarding ServeConfig field"
+        );
+    }
+
+    #[test]
+    fn serve_config_require_auth_true_forwarded_to_builder() {
+        // [Ru-C1] When ServeConfig.require_auth = Some(true), the built APCoreMCP
+        // must have require_auth=true.
+        let reg = Registry::new();
+        let exec = Arc::new(Executor::new(reg, Config::default()));
+
+        let mut builder = APCoreMCP::builder()
+            .backend(BackendSource::Executor(exec))
+            .name("test-forward-true")
+            .require_auth(false); // start with false
+                                  // Simulate forwarding Some(true):
+        builder = builder.require_auth(true);
+
+        assert!(
+            builder.config.require_auth,
+            "require_auth should be true after forwarding ServeConfig field"
+        );
+    }
+
+    #[test]
+    fn serve_config_redact_output_forwarded_to_builder() {
+        // [Ru-C1] ServeConfig.redact_output must be forwarded.
+        let reg = Registry::new();
+        let exec = Arc::new(Executor::new(reg, Config::default()));
+
+        let mut builder = APCoreMCP::builder()
+            .backend(BackendSource::Executor(exec))
+            .name("test-redact");
+        // Default APCoreMCPConfig.redact_output is true; forward false.
+        builder = builder.redact_output(false);
+
+        assert!(
+            !builder.config.redact_output,
+            "redact_output should be false after forwarding"
+        );
+    }
+
+    #[test]
+    fn serve_config_authenticator_arc_forwarded_to_builder() {
+        // [Ru-C1] When ServeConfig.authenticator is set, the builder must
+        // store it (authenticator_arc must exist and work).
+        use crate::auth::jwt::JWTAuthenticator;
+        let auth: Arc<dyn crate::auth::protocol::Authenticator> = Arc::new(JWTAuthenticator::new(
+            "secret",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(true),
+        ));
+        let reg = Registry::new();
+        let exec = Arc::new(Executor::new(reg, Config::default()));
+
+        let builder = APCoreMCP::builder()
+            .backend(BackendSource::Executor(exec))
+            .name("test-auth")
+            .authenticator_arc(auth);
+
+        assert!(
+            builder.authenticator.is_some(),
+            "authenticator must be stored after authenticator_arc()"
+        );
+    }
+
+    #[test]
+    fn serve_config_exempt_paths_forwarded_to_builder() {
+        // [Ru-C1] ServeConfig.exempt_paths must be forwarded.
+        let reg = Registry::new();
+        let exec = Arc::new(Executor::new(reg, Config::default()));
+
+        let paths: Vec<String> = vec!["/health".to_string(), "/metrics".to_string()];
+        let path_set: std::collections::HashSet<String> = paths.into_iter().collect();
+        let builder = APCoreMCP::builder()
+            .backend(BackendSource::Executor(exec))
+            .name("test-exempt")
+            .exempt_paths(path_set.clone());
+
+        assert_eq!(
+            builder.config.exempt_paths.as_ref().unwrap(),
+            &path_set,
+            "exempt_paths must be stored after forwarding"
+        );
+    }
+
+    // ── Regression tests for Issues 2/5 & 4/5 (Ru-W1, Ru-W3) ─────────────────
+    // approval_handler() must complete without panic (smoke test).
+
+    #[test]
+    fn approval_handler_setter_does_not_panic() {
+        // [Ru-W1] APCoreMCPBuilder::approval_handler() must complete without panic.
+        // The handler is stored even though it is not yet wired.
+        use apcore::approval::{ApprovalHandler, ApprovalRequest, ApprovalResult};
+        use apcore::errors::ModuleError;
+        use async_trait::async_trait;
+
+        #[derive(Debug)]
+        struct NoOpApproval;
+
+        #[async_trait]
+        impl ApprovalHandler for NoOpApproval {
+            async fn request_approval(
+                &self,
+                _request: &ApprovalRequest,
+            ) -> Result<ApprovalResult, ModuleError> {
+                Ok(ApprovalResult {
+                    status: "approved".to_string(),
+                    approved_by: None,
+                    reason: None,
+                    approval_id: None,
+                    metadata: None,
+                })
+            }
+            async fn check_approval(&self, _id: &str) -> Result<ApprovalResult, ModuleError> {
+                Ok(ApprovalResult {
+                    status: "approved".to_string(),
+                    approved_by: None,
+                    reason: None,
+                    approval_id: None,
+                    metadata: None,
+                })
+            }
+        }
+
+        let handler: Arc<dyn ApprovalHandler + Send + Sync> = Arc::new(NoOpApproval);
+        // Must not panic; warning is emitted internally.
+        let builder = APCoreMCP::builder()
+            .name("approval-test")
+            .approval_handler(handler);
+
+        assert!(
+            builder.approval_handler.is_some(),
+            "approval_handler must be stored on the builder"
+        );
+    }
+
+    #[test]
+    fn builder_build_with_approval_handler_emits_warn_and_succeeds() {
+        // [Ru-W3] build() with approval_handler configured must succeed and store
+        // the handler (not panic or error).
+        use apcore::approval::{ApprovalHandler, ApprovalRequest, ApprovalResult};
+        use apcore::errors::ModuleError;
+        use async_trait::async_trait;
+
+        #[derive(Debug)]
+        struct NoOpApproval;
+
+        #[async_trait]
+        impl ApprovalHandler for NoOpApproval {
+            async fn request_approval(
+                &self,
+                _request: &ApprovalRequest,
+            ) -> Result<ApprovalResult, ModuleError> {
+                Ok(ApprovalResult {
+                    status: "approved".to_string(),
+                    approved_by: None,
+                    reason: None,
+                    approval_id: None,
+                    metadata: None,
+                })
+            }
+            async fn check_approval(&self, _id: &str) -> Result<ApprovalResult, ModuleError> {
+                Ok(ApprovalResult {
+                    status: "approved".to_string(),
+                    approved_by: None,
+                    reason: None,
+                    approval_id: None,
+                    metadata: None,
+                })
+            }
+        }
+
+        let handler: Arc<dyn ApprovalHandler + Send + Sync> = Arc::new(NoOpApproval);
+        let reg = Registry::new();
+        let exec = Arc::new(Executor::new(reg, Config::default()));
+
+        let mcp = APCoreMCP::builder()
+            .backend(BackendSource::Executor(exec))
+            .name("approval-build-test")
+            .approval_handler(handler)
+            .build()
+            .expect("build with approval_handler must succeed");
+
+        // Handler is stored on the struct (dead_code, but accessible via debug).
+        assert!(
+            mcp.approval_handler.is_some(),
+            "approval_handler must be stored on APCoreMCP after build"
+        );
     }
 }

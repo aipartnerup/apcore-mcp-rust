@@ -260,8 +260,43 @@ mod tests {
         );
     }
 
-    // Note: callback panic catching is deferred until `futures` crate is added.
-    // The current implementation does not catch panics in the elicit callback.
+    // -- elicit callback panic-catching test (Ru-W2) ---------------------------
+
+    #[tokio::test]
+    async fn test_elicit_callback_panic_is_caught() {
+        // [Ru-W2] The production code already uses `futures::FutureExt::catch_unwind`
+        // (lines 118-131). A panicking callback must be caught and degraded to a
+        // rejected ApprovalResult, NOT propagate as a panic.
+        let panic_cb: ElicitCallback = Box::new(|_msg, _schema| {
+            Box::pin(async move {
+                panic!("elicit callback panicked intentionally");
+            })
+        });
+        let handler = ElicitationApprovalHandler::new(Some(panic_cb));
+        let req = ApprovalRequest {
+            module_id: "test_module".to_string(),
+            arguments: serde_json::json!({}),
+            context: None,
+            annotations: Default::default(),
+            description: None,
+            tags: vec![],
+        };
+        let result = handler.request_approval(&req).await;
+        assert!(
+            result.is_ok(),
+            "panicking callback must not propagate as Err"
+        );
+        let approval = result.unwrap();
+        assert_eq!(
+            approval.status, "rejected",
+            "panicking callback must yield rejected status"
+        );
+        assert_eq!(
+            approval.reason.as_deref(),
+            Some("Elicitation request failed"),
+            "panic rejection reason must be 'Elicitation request failed'"
+        );
+    }
 
     // -- check_approval tests -------------------------------------------------
 
