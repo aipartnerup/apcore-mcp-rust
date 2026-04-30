@@ -15,6 +15,7 @@ use apcore::executor::Executor;
 use apcore::registry::registry::Registry;
 
 use crate::auth::protocol::Authenticator;
+use crate::config;
 use crate::converters::openai::OpenAIConverter;
 use crate::explorer::{create_explorer_mount, ExplorerConfig, ToolInfo};
 use crate::server::factory::MCPServerFactory;
@@ -1604,13 +1605,47 @@ pub struct OpenAIToolsConfig {
 /// Constructs an [`APCoreMCP`] internally from the given backend source
 /// and config, then calls [`APCoreMCP::serve`].
 pub fn serve(backend: impl Into<BackendSource>, config: ServeConfig) -> Result<(), APCoreMCPError> {
+    // [D9-003] Apply caller-wins precedence: caller `ServeConfig` field →
+    // Config Bus → hardcoded `ServeConfig::default()`. We can only detect
+    // "caller did not set this field" by comparing to the default value.
+    // Callers who pass `ServeConfig { name: "x".into(), ..ServeConfig::default() }`
+    // and set `APCORE_MCP_PORT=9000` in env will see port resolve to 9000.
+    let bus = config::get_scalar_config();
+    let defaults = ServeConfig::default();
+    let transport = if config.transport != defaults.transport {
+        config.transport.clone()
+    } else {
+        bus.transport.unwrap_or(config.transport.clone())
+    };
+    let host = if config.host != defaults.host {
+        config.host.clone()
+    } else {
+        bus.host.unwrap_or(config.host.clone())
+    };
+    let port = if config.port != defaults.port {
+        config.port
+    } else {
+        bus.port.unwrap_or(config.port)
+    };
+    let name = if config.name != defaults.name {
+        config.name.clone()
+    } else {
+        bus.name.unwrap_or(config.name.clone())
+    };
+    let validate_inputs = if config.validate_inputs != defaults.validate_inputs {
+        config.validate_inputs
+    } else {
+        bus.validate_inputs.unwrap_or(config.validate_inputs)
+    };
+    let log_level = config.log_level.clone().or(bus.log_level);
+
     let mut builder = APCoreMCP::builder()
         .backend(backend)
-        .name(&config.name)
-        .transport(&config.transport)
-        .host(&config.host)
-        .port(config.port)
-        .validate_inputs(config.validate_inputs);
+        .name(&name)
+        .transport(&transport)
+        .host(&host)
+        .port(port)
+        .validate_inputs(validate_inputs);
 
     if let Some(version) = config.version.as_deref() {
         builder = builder.version(version);
@@ -1621,8 +1656,8 @@ pub fn serve(backend: impl Into<BackendSource>, config: ServeConfig) -> Result<(
     if let Some(prefix) = config.prefix.as_deref() {
         builder = builder.prefix(prefix);
     }
-    if let Some(log_level) = config.log_level.as_deref() {
-        builder = builder.log_level(log_level);
+    if let Some(level) = log_level.as_deref() {
+        builder = builder.log_level(level);
     }
     if let Some(strategy) = config.strategy.as_deref() {
         builder = builder.strategy(strategy);
@@ -1632,7 +1667,8 @@ pub fn serve(backend: impl Into<BackendSource>, config: ServeConfig) -> Result<(
     if let Some(auth) = config.authenticator {
         builder = builder.authenticator_arc(auth);
     }
-    if let Some(rq) = config.require_auth {
+    // [D9-003] require_auth: caller's Some wins; bus fills None.
+    if let Some(rq) = config.require_auth.or(bus.require_auth) {
         builder = builder.require_auth(rq);
     }
     if let Some(paths) = config.exempt_paths {
@@ -1690,10 +1726,27 @@ pub async fn async_serve(
     backend: impl Into<BackendSource>,
     config: AsyncServeConfig,
 ) -> Result<Router, APCoreMCPError> {
+    // [D9-003] Same caller-wins precedence as serve(). async_serve does not
+    // bind a transport (returns an axum Router), so transport/host/port are
+    // not part of the resolved set here.
+    let bus = config::get_scalar_config();
+    let defaults = AsyncServeConfig::default();
+    let name = if config.name != defaults.name {
+        config.name.clone()
+    } else {
+        bus.name.unwrap_or(config.name.clone())
+    };
+    let validate_inputs = if config.validate_inputs != defaults.validate_inputs {
+        config.validate_inputs
+    } else {
+        bus.validate_inputs.unwrap_or(config.validate_inputs)
+    };
+    let log_level = config.log_level.clone().or(bus.log_level);
+
     let mut builder = APCoreMCP::builder()
         .backend(backend)
-        .name(&config.name)
-        .validate_inputs(config.validate_inputs);
+        .name(&name)
+        .validate_inputs(validate_inputs);
 
     if let Some(version) = config.version.as_deref() {
         builder = builder.version(version);
@@ -1704,8 +1757,8 @@ pub async fn async_serve(
     if let Some(prefix) = config.prefix.as_deref() {
         builder = builder.prefix(prefix);
     }
-    if let Some(log_level) = config.log_level.as_deref() {
-        builder = builder.log_level(log_level);
+    if let Some(level) = log_level.as_deref() {
+        builder = builder.log_level(level);
     }
     if let Some(strategy) = config.strategy.as_deref() {
         builder = builder.strategy(strategy);
@@ -1715,7 +1768,8 @@ pub async fn async_serve(
     if let Some(auth) = config.authenticator {
         builder = builder.authenticator_arc(auth);
     }
-    if let Some(rq) = config.require_auth {
+    // [D9-003] require_auth: caller's Some wins; bus fills None.
+    if let Some(rq) = config.require_auth.or(bus.require_auth) {
         builder = builder.require_auth(rq);
     }
     if let Some(paths) = config.exempt_paths {

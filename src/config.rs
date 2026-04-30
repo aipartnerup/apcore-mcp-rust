@@ -65,6 +65,75 @@ pub fn get_acl_config() -> Option<serde_json::Value> {
     ns_value.get("acl").cloned().filter(|v| !v.is_null())
 }
 
+/// Scalar Config Bus values consumed by the convenience [`crate::serve`] /
+/// [`crate::async_serve`] functions. Mirrors the 9 scalar keys declared in
+/// [`mcp_defaults`] and the corresponding TypeScript `ConfigBusDefaults` so
+/// callers setting `APCORE_MCP_PORT=9000` actually see the change. [D9-003]
+#[derive(Debug, Default, Clone)]
+pub struct McpScalarConfig {
+    pub transport: Option<String>,
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    pub name: Option<String>,
+    pub log_level: Option<String>,
+    pub validate_inputs: Option<bool>,
+    pub explorer: Option<bool>,
+    pub explorer_prefix: Option<String>,
+    pub require_auth: Option<bool>,
+}
+
+/// Read the 9 scalar `mcp.*` keys from the Config Bus.
+///
+/// Discovers the config exactly once and returns the keys typed for direct
+/// use by the convenience entrypoints. Returns an all-None struct on any
+/// error (Config Bus unavailable, namespace missing) so callers can fall
+/// through to their hardcoded defaults.
+pub fn get_scalar_config() -> McpScalarConfig {
+    fn read(config: &Config, key: &str) -> Option<serde_json::Value> {
+        config
+            .namespace(MCP_NAMESPACE)
+            .and_then(|ns| ns.get(key).cloned())
+            .filter(|v| !v.is_null())
+    }
+    let Ok(config) = Config::discover() else {
+        return McpScalarConfig::default();
+    };
+    McpScalarConfig {
+        transport: read(&config, "transport").and_then(|v| v.as_str().map(str::to_string)),
+        host: read(&config, "host").and_then(|v| v.as_str().map(str::to_string)),
+        port: read(&config, "port").and_then(|v| {
+            v.as_u64()
+                .and_then(|n| u16::try_from(n).ok())
+                .or_else(|| v.as_str().and_then(|s| s.parse::<u16>().ok()))
+        }),
+        name: read(&config, "name").and_then(|v| v.as_str().map(str::to_string)),
+        log_level: read(&config, "log_level").and_then(|v| v.as_str().map(str::to_string)),
+        validate_inputs: read(&config, "validate_inputs").and_then(|v| {
+            v.as_bool().or_else(|| match v.as_str() {
+                Some("true") => Some(true),
+                Some("false") => Some(false),
+                _ => None,
+            })
+        }),
+        explorer: read(&config, "explorer").and_then(|v| {
+            v.as_bool().or_else(|| match v.as_str() {
+                Some("true") => Some(true),
+                Some("false") => Some(false),
+                _ => None,
+            })
+        }),
+        explorer_prefix: read(&config, "explorer_prefix")
+            .and_then(|v| v.as_str().map(str::to_string)),
+        require_auth: read(&config, "require_auth").and_then(|v| {
+            v.as_bool().or_else(|| match v.as_str() {
+                Some("true") => Some(true),
+                Some("false") => Some(false),
+                _ => None,
+            })
+        }),
+    }
+}
+
 /// Returns the default configuration values for the MCP namespace.
 pub fn mcp_defaults() -> serde_json::Value {
     serde_json::json!({
@@ -118,5 +187,29 @@ mod tests {
     fn test_register_mcp_namespace_idempotent() {
         register_mcp_namespace();
         register_mcp_namespace(); // Should not panic
+    }
+
+    #[test]
+    fn test_get_scalar_config_returns_struct_without_panic() {
+        // [D9-003] get_scalar_config must not panic when no config file is
+        // discoverable; it should return McpScalarConfig::default() (all None)
+        // so callers fall through to their hardcoded defaults.
+        let _scalar = get_scalar_config();
+    }
+
+    #[test]
+    fn test_mcp_scalar_config_default_all_none() {
+        // [D9-003] The default state means "no Config Bus override" — all
+        // fields are None so the caller's ServeConfig values are preserved.
+        let scalar = McpScalarConfig::default();
+        assert!(scalar.transport.is_none());
+        assert!(scalar.host.is_none());
+        assert!(scalar.port.is_none());
+        assert!(scalar.name.is_none());
+        assert!(scalar.log_level.is_none());
+        assert!(scalar.validate_inputs.is_none());
+        assert!(scalar.explorer.is_none());
+        assert!(scalar.explorer_prefix.is_none());
+        assert!(scalar.require_auth.is_none());
     }
 }
