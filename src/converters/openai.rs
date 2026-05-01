@@ -466,11 +466,9 @@ impl OpenAIConverter {
                             Value::String("null".to_string()),
                         ]);
                     }
-                    Value::Array(arr) => {
+                    Value::Array(arr) if !arr.contains(&Value::String("null".to_string())) => {
                         // ["string", "integer"] -> ["string", "integer", "null"]
-                        if !arr.contains(&Value::String("null".to_string())) {
-                            arr.push(Value::String("null".to_string()));
-                        }
+                        arr.push(Value::String("null".to_string()));
                     }
                     _ => {}
                 }
