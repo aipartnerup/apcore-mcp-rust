@@ -323,6 +323,26 @@ pub struct APCoreMCP {
     approval_handler: Option<Arc<dyn ApprovalHandler>>,
 }
 
+/// Project a tool list down to the entries shown in the Explorer UI,
+/// dropping reserved `__apcore_*` meta-tools (F-043 AsyncTaskBridge). The
+/// meta-tools remain in the MCP `tools/list` response — only the human-
+/// facing UI hides them, since their multi-step submit/status/cancel/list
+/// flow does not fit a one-form-per-tool layout.
+fn filter_explorer_tools(tools: &[Tool]) -> Vec<ToolInfo> {
+    tools
+        .iter()
+        .filter(|t| {
+            !t.name
+                .starts_with(crate::server::async_task_bridge::META_TOOL_PREFIX)
+        })
+        .map(|t| ToolInfo {
+            name: t.name.clone(),
+            description: t.description.clone(),
+            input_schema: t.input_schema.clone(),
+        })
+        .collect()
+}
+
 impl APCoreMCP {
     /// Create a new builder.
     pub fn builder() -> APCoreMCPBuilder {
@@ -485,6 +505,12 @@ impl APCoreMCP {
     }
 
     /// Build an [`ExplorerConfig`] from the given tools and explorer parameters.
+    ///
+    /// Hides reserved `__apcore_*` meta-tools from the Explorer UI — they are
+    /// protocol-level operations meant for programmatic MCP clients, not for
+    /// the form-driven Explorer UX. They remain advertised via `tools/list`.
+    /// Mirrors apcore-mcp-python's `__init__.py` which builds a parallel
+    /// `explorer_tools` list excluding meta-tools.
     #[allow(clippy::too_many_arguments)]
     fn build_explorer_config(
         &self,
@@ -496,14 +522,7 @@ impl APCoreMCP {
         project_name: Option<&str>,
         project_url: Option<&str>,
     ) -> ExplorerConfig {
-        let tool_infos: Vec<ToolInfo> = tools
-            .iter()
-            .map(|t| ToolInfo {
-                name: t.name.clone(),
-                description: t.description.clone(),
-                input_schema: t.input_schema.clone(),
-            })
-            .collect();
+        let tool_infos = filter_explorer_tools(tools);
 
         let mut config = ExplorerConfig::new(tool_infos)
             .explorer_prefix(prefix)
@@ -2857,6 +2876,64 @@ mod tests {
         assert_eq!(cfg.name, "async-test");
         assert!(cfg.authenticator.is_some());
         assert_eq!(cfg.require_auth, Some(false));
+    }
+
+    // ── filter_explorer_tools — F-043 meta-tools hidden from UI ──────────────
+
+    fn make_tool(name: &str) -> Tool {
+        Tool {
+            name: name.to_string(),
+            description: format!("desc-{name}"),
+            input_schema: json!({"type": "object"}),
+            annotations: None,
+            meta: None,
+        }
+    }
+
+    #[test]
+    fn filter_explorer_tools_drops_apcore_meta_prefix() {
+        // Mixed input: 3 user tools + 4 reserved meta-tools.
+        let tools = vec![
+            make_tool("text.echo"),
+            make_tool("math.calc"),
+            make_tool("__apcore_task_submit"),
+            make_tool("__apcore_task_status"),
+            make_tool("greeting"),
+            make_tool("__apcore_task_cancel"),
+            make_tool("__apcore_task_list"),
+        ];
+
+        let infos = filter_explorer_tools(&tools);
+        let names: Vec<&str> = infos.iter().map(|i| i.name.as_str()).collect();
+
+        assert_eq!(names, vec!["text.echo", "math.calc", "greeting"]);
+        assert!(
+            !names.iter().any(|n| n.starts_with("__apcore_")),
+            "filter_explorer_tools must hide reserved meta-tools from UI"
+        );
+    }
+
+    #[test]
+    fn filter_explorer_tools_passes_through_user_tools_unchanged() {
+        let tools = vec![make_tool("a.b"), make_tool("c.d")];
+        let infos = filter_explorer_tools(&tools);
+        assert_eq!(infos.len(), 2);
+        assert_eq!(infos[0].name, "a.b");
+        assert_eq!(infos[0].description, "desc-a.b");
+        assert_eq!(infos[1].name, "c.d");
+    }
+
+    #[test]
+    fn filter_explorer_tools_only_filters_exact_prefix() {
+        // A tool whose name *contains* "__apcore_" but doesn't start with it
+        // is a user tool and must NOT be hidden.
+        let tools = vec![
+            make_tool("user__apcore_thing"),
+            make_tool("__apcore_task_submit"),
+        ];
+        let infos = filter_explorer_tools(&tools);
+        let names: Vec<&str> = infos.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["user__apcore_thing"]);
     }
 
     // ── Regression tests for Issues 1/5 & 5/5 (Ru-C1, Ru-W4) ─────────────────

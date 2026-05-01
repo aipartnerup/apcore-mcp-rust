@@ -5,12 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.14.0] - 2026-04-28
+
+## [0.14.0] - 2026-05-01
 
 Leverages apcore 0.19.0 + apcore-toolkit 0.5.0. Wires three apcore modules
 that the bridge previously did not use: `trace_context`, `async_task`, and
 `observability::{metrics,usage}`. Aligns the Rust bridge with the Python
 and TypeScript 0.14.0 implementations.
+
+### Fixed
+
+- **Explorer UI hides `__apcore_*` meta-tools.** The four reserved F-043
+  meta-tools (`__apcore_task_submit`, `__apcore_task_status`,
+  `__apcore_task_cancel`, `__apcore_task_list`) are protocol-level
+  operations meant for programmatic MCP clients; their multi-step
+  submit/status flow does not fit the form-driven Explorer UX. Filter
+  added in `src/apcore_mcp.rs::filter_explorer_tools`; reuses
+  `META_TOOL_PREFIX` from `src/server/async_task_bridge.rs`. Aligns
+  Rust with apcore-mcp-python (`__init__.py` builds a parallel
+  `explorer_tools` list excluding meta-tools) and apcore-mcp-typescript
+  (the `apcore-explorer-ui` package filters them client-side). The MCP
+  `tools/list` response is unchanged — real MCP clients still discover
+  and call meta-tools.
 
 ### Changed
 
