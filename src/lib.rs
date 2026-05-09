@@ -19,6 +19,11 @@ pub mod helpers;
 /// Kept crate-private until F-039 (Schema Inspector) ships per PRD; promote to
 /// `pub mod` when the implementation lands.
 pub(crate) mod inspector;
+/// Markdown rendering for tool descriptions via apcore-toolkit's
+/// `format_module(style = Markdown)`. LLMs select tools primarily from
+/// the `description` string; richer Markdown packs more decision
+/// signal per token than a one-line summary. apcore-toolkit 0.6+.
+pub mod markdown;
 pub mod middleware_builder;
 pub mod server;
 /// Crate version, kept in sync with Cargo.toml.
@@ -61,7 +66,9 @@ pub use crate::adapters::SchemaConverter;
 pub use crate::config::{mcp_defaults, register_mcp_namespace, MCP_ENV_PREFIX, MCP_NAMESPACE};
 
 // ---- Re-exports: converters -------------------------------------------------
-pub use crate::converters::openai::{ConverterError, OpenAIConverter};
+pub use crate::converters::openai::{
+    json_entry_to_scanned_module, ConvertOptions, ConverterError, OpenAIConverter,
+};
 
 // ---- Re-exports: helpers ----------------------------------------------------
 pub use crate::helpers::{elicit, report_progress, ElicitResult, MCP_ELICIT_KEY, MCP_PROGRESS_KEY};

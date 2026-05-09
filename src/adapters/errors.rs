@@ -258,7 +258,6 @@ impl ErrorMapper {
             ApcoreErrorCode::BindingSchemaInferenceFailed
                 | ApcoreErrorCode::BindingSchemaModeConflict
                 | ApcoreErrorCode::BindingStrictSchemaIncompatible
-                | ApcoreErrorCode::BindingPolicyViolation
                 | ApcoreErrorCode::VersionConstraintInvalid
         ) {
             return build_detail_response(error, error_type, error.message.clone());
@@ -277,6 +276,29 @@ impl ErrorMapper {
                     "AsyncTaskManager has reached its max_tasks cap. \
                      Wait for in-flight tasks to complete, or cancel \
                      tasks via __apcore_task_cancel before retrying."
+                        .to_string(),
+                );
+            }
+            return resp;
+        }
+
+        // apcore 0.20.0 (sync alignment A-001): surface circuit-breaker
+        // rejections with retryable=true plus a recovery hint so the AI
+        // orchestrator backs off until the recovery window elapses. The
+        // error already carries a per-module `ai_guidance` populated by
+        // `apcore::errors::ErrorBuilder::circuit_breaker_open` — we mirror
+        // it onto the MCP envelope without overwriting.
+        if code == ApcoreErrorCode::CircuitBreakerOpen {
+            let mut resp = build_detail_response(error, error_type, error.message.clone());
+            if resp.retryable.is_none() {
+                resp.retryable = Some(true);
+            }
+            if resp.ai_guidance.is_none() {
+                resp.ai_guidance = Some(
+                    "Module's circuit breaker is OPEN — repeated failures have \
+                     tripped the breaker. Wait until the recovery window elapses, \
+                     then retry; the breaker will move to HALF_OPEN and accept a \
+                     trial call."
                         .to_string(),
                 );
             }
@@ -734,5 +756,28 @@ mod tests {
         let resp_any = ErrorMapper::to_mcp_error_any(&module_err);
         assert_eq!(resp_typed.error_type, resp_any.error_type);
         assert_eq!(resp_typed.message, resp_any.message);
+    }
+
+    #[test]
+    fn test_circuit_breaker_open_maps_to_retryable_with_guidance() {
+        // apcore 0.20.0 sync alignment A-001: CIRCUIT_BREAKER_OPEN must
+        // surface as retryable=true with an AI-facing recovery hint so
+        // downstream agents back off instead of hammering an open breaker.
+        let err = ModuleError::new(
+            ApcoreErrorCode::CircuitBreakerOpen,
+            "Circuit open for module 'demo.module' — call rejected",
+        );
+        let resp = ErrorMapper::to_mcp_error(&err);
+        assert_eq!(resp.error_type, "CIRCUIT_BREAKER_OPEN");
+        assert_eq!(resp.retryable, Some(true));
+        assert!(
+            resp.ai_guidance
+                .as_deref()
+                .unwrap_or("")
+                .to_lowercase()
+                .contains("circuit"),
+            "ai_guidance should mention the circuit breaker; got {:?}",
+            resp.ai_guidance
+        );
     }
 }

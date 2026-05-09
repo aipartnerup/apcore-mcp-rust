@@ -6,6 +6,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.15.0] - 2026-05-09
+
+Leverages **apcore 0.21.0 + apcore-toolkit 0.6.0**. Cross-SDK byte-
+equivalent with `apcore-mcp-python` and `apcore-mcp-typescript` 0.15.0.
+
+### Changed (BREAKING)
+
+- **`apcore` minimum version bumped to `0.21`** (was `0.19`). Downstream
+  consumers must pick up the async-ified `AsyncTaskManager.{submit,cancel,shutdown}`
+  signatures (D10-003, D10-004), the `#[non_exhaustive]` annotation on
+  `ApprovalRequest` / `ApprovalResult`, and the removal of
+  `ApcoreErrorCode::BindingPolicyViolation` (the wire string
+  `"BINDING_POLICY_VIOLATION"` is retained in
+  `apcore_mcp::constants::ErrorCode` for backward-compat with legacy
+  custom emitters).
+- **`apcore-toolkit` minimum version bumped to `0.6`** (was `0.5`).
+- **`AsyncTaskBridge::{submit, cancel, cancel_session_tasks, handle_meta_tool, handle_submit, handle_cancel, shutdown}` are now `async fn`** — propagates the upstream apcore 0.20+ async signatures. Sync transport-layer cancel handlers (the `Fn(&str)` closures installed via `transport_manager.set_cancel_handler` and `server_handler.with_cancel_handler`) now `tokio::spawn` the cancel call as fire-and-forget. The `progress_tokens` mutex guard is held in a tighter scope so the cancel future remains `Send` across the `.await` boundary.
+
+### Added
+
+- **`__apcore_module_preview` meta-tool** (apcore 0.21 PROTOCOL_SPEC §5.6 / §12.8) — fifth reserved meta-tool alongside the four `__apcore_task_*` ones. New `META_TOOL_PREVIEW` constant. The `handle_preview` async method drives `executor.validate(module_id, inputs, context)` and returns a `{valid, requires_approval, predicted_changes, checks}` JSON envelope WITHOUT executing the module. `arguments: null` and missing `arguments` are both preserved as `Value::Null` (the calling business decides whether null is acceptable); structurally-wrong shapes (arrays, scalars) error with `__apcore_module_preview requires 'arguments' to be a JSON object or null`. `MCPServerFactory::append_meta_tools` and `build_server_components` test counts updated to 5.
+- **`MCPServerFactory::with_rich_description(bool)` constructor** + `rich_description()` accessor — when set, `build_tools` renders `Tool.description` as canonical apcore-toolkit Markdown (`format_module(ModuleStyle::Markdown)`) instead of `registry.describe()`. Display-overlay `mcp.description` overrides still win first. LLMs select tools primarily from this string; Markdown packs more decision signal per token.
+- **`OpenAIConverter::convert_descriptor_with_options` / `convert_registry_with_options` / `convert_registry_apcore_with_options`** — accept a `ConvertOptions` struct (`embed_annotations`, `strict`, `rich_description`) so cross-cutting flags don't ratchet the positional signature of every public method. The original 5-positional-arg variants are retained as thin wrappers, no test breakage. The JSON path delegates to a new public `json_entry_to_scanned_module(module_id, entry)` adapter so duck-typed JSON registries can drive the same Markdown rendering path; the `&Registry` path uses `markdown::render_module_markdown(&descriptor, true)` directly to leverage the strictly-richer `ModuleDescriptor` (full `documentation`, `examples`, `display` overlay).
+- **`apcore_mcp::markdown` module** — public helpers `descriptor_to_scanned_module(&ModuleDescriptor) -> ScannedModule` and `render_module_markdown(&ModuleDescriptor, display: bool) -> String` for crate users wanting to render Markdown directly.
+- **`ApcoreErrorCode::CircuitBreakerOpen` mapping** (apcore 0.20 sync alignment A-001) — `ErrorMapper` now dispatches the breaker-open code to a retryable=true envelope with `ai_guidance` mirrored from the upstream error (or a generic recovery hint when absent). New `apcore_mcp::constants::ErrorCode::CircuitBreakerOpen` enum variant. Strum `EnumIter` count is now **36** (was 35); cross-language parity test (`all_python_error_codes_parse`) updated.
+- **Public re-exports** in `lib.rs`: `markdown` module, `ConvertOptions`, `json_entry_to_scanned_module`.
+
+### Fixed
+
+- **`ApprovalResult` / `ApprovalRequest` construction** — adapted to apcore 0.21's `#[non_exhaustive]` annotations. Replaced struct-literal construction with `let mut x = X::default(); x.field = ...; x` pattern across `adapters/approval.rs` and the `apcore_mcp.rs` test stubs.
+- **`adapters/errors.rs` match arm cleanup** — removed the now-deleted `ApcoreErrorCode::BindingPolicyViolation` variant from the binding-error match (apcore 0.21 dropped the variant; the wire code remains supported via the constants table).
+
+### Tests
+
+- +12 new tests covering `__apcore_module_preview` (registration, basic predict, missing module_id, `arguments: null` preserved, missing arguments preserved, array rejection), `CIRCUIT_BREAKER_OPEN` mapping (retryable + ai_guidance), `rich_description` on factory + JSON path + apcore-Registry path, and the `json_entry_to_scanned_module` adapter (overlapping fields, sparse defaults).
+- Total suite: **843 passed** (was 828).
+
+
 ## [0.14.0] - 2026-05-01
 
 Leverages apcore 0.19.0 + apcore-toolkit 0.5.0. Wires three apcore modules

@@ -46,24 +46,17 @@ impl fmt::Debug for ElicitationApprovalHandler {
 
 /// Build a rejected [`ApprovalResult`] with the given reason.
 fn rejected(reason: &str) -> ApprovalResult {
-    ApprovalResult {
-        status: "rejected".to_string(),
-        approved_by: None,
-        reason: Some(reason.to_string()),
-        approval_id: None,
-        metadata: None,
-    }
+    let mut result = ApprovalResult::default();
+    result.status = "rejected".to_string();
+    result.reason = Some(reason.to_string());
+    result
 }
 
 /// Build an approved [`ApprovalResult`].
 fn approved() -> ApprovalResult {
-    ApprovalResult {
-        status: "approved".to_string(),
-        approved_by: None,
-        reason: None,
-        approval_id: None,
-        metadata: None,
-    }
+    let mut result = ApprovalResult::default();
+    result.status = "approved".to_string();
+    result
 }
 
 #[async_trait]
@@ -178,14 +171,12 @@ mod tests {
 
     /// Create a mock [`ApprovalRequest`] for testing.
     fn test_request() -> ApprovalRequest {
-        ApprovalRequest {
-            module_id: "test.dangerous_tool".to_string(),
-            arguments: json!({"path": "/etc/passwd"}),
-            context: None,
-            annotations: Default::default(),
-            description: Some("Delete a system file".to_string()),
-            tags: vec!["destructive".to_string()],
-        }
+        let mut req = ApprovalRequest::default();
+        req.module_id = "test.dangerous_tool".to_string();
+        req.arguments = json!({"path": "/etc/passwd"});
+        req.description = Some("Delete a system file".to_string());
+        req.tags = vec!["destructive".to_string()];
+        req
     }
 
     // -- request_approval tests -----------------------------------------------
@@ -273,13 +264,11 @@ mod tests {
             })
         });
         let handler = ElicitationApprovalHandler::new(Some(panic_cb));
-        let req = ApprovalRequest {
-            module_id: "test_module".to_string(),
-            arguments: serde_json::json!({}),
-            context: None,
-            annotations: Default::default(),
-            description: None,
-            tags: vec![],
+        let req = {
+            let mut r = ApprovalRequest::default();
+            r.module_id = "test_module".to_string();
+            r.arguments = serde_json::json!({});
+            r
         };
         let result = handler.request_approval(&req).await;
         assert!(
@@ -354,13 +343,11 @@ mod tests {
         // D10-002: When no context AND no callback, result must be Ok(rejected),
         // not Err. Reason must indicate "No context available for elicitation".
         let handler = ElicitationApprovalHandler::new(None);
-        let request = ApprovalRequest {
-            module_id: "test.tool".to_string(),
-            arguments: json!({}),
-            context: None, // no context
-            annotations: Default::default(),
-            description: None,
-            tags: vec![],
+        let request = {
+            let mut r = ApprovalRequest::default();
+            r.module_id = "test.tool".to_string();
+            r.arguments = json!({});
+            r
         };
         let result = handler.request_approval(&request).await.unwrap();
         assert_eq!(result.status, "rejected");
@@ -429,13 +416,11 @@ mod tests {
         });
 
         let handler = ElicitationApprovalHandler::new(Some(cb));
-        let request = ApprovalRequest {
-            module_id: "test.tool".to_string(),
-            arguments: json!({"key": "val"}),
-            context: None,
-            annotations: Default::default(),
-            description: None,
-            tags: vec![],
+        let request = {
+            let mut r = ApprovalRequest::default();
+            r.module_id = "test.tool".to_string();
+            r.arguments = json!({"key": "val"});
+            r
         };
         handler.request_approval(&request).await.unwrap();
 

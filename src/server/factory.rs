@@ -175,6 +175,14 @@ pub struct MCPServerFactory {
     schema_converter: SchemaConverter,
     #[allow(dead_code)]
     annotation_mapper: AnnotationMapper,
+    /// When `true`, MCP `Tool.description` is rendered as canonical
+    /// apcore-toolkit Markdown (title, description, parameters,
+    /// returns, behavior table, tags, examples) instead of the plain
+    /// one-line description. LLMs select tools primarily from this
+    /// string — Markdown packs more decision-relevant signal per
+    /// token. apcore-toolkit 0.6+. Display-overlay
+    /// `mcp.description` overrides are still honoured first.
+    rich_description: bool,
 }
 
 impl Default for MCPServerFactory {
@@ -189,7 +197,24 @@ impl MCPServerFactory {
         Self {
             schema_converter: SchemaConverter,
             annotation_mapper: AnnotationMapper,
+            rich_description: false,
         }
+    }
+
+    /// Create a factory whose `build_tools` renders `Tool.description`
+    /// as apcore-toolkit Markdown. See struct-level field docs for
+    /// rationale.
+    pub fn with_rich_description(rich_description: bool) -> Self {
+        Self {
+            schema_converter: SchemaConverter,
+            annotation_mapper: AnnotationMapper,
+            rich_description,
+        }
+    }
+
+    /// Whether this factory renders `Tool.description` as Markdown.
+    pub fn rich_description(&self) -> bool {
+        self.rich_description
     }
 
     /// Create a new MCP server instance.
@@ -364,11 +389,21 @@ impl MCPServerFactory {
                 .and_then(|d| d.get("alias"))
                 .and_then(|v| v.as_str());
 
+            // Resolution chain for the LLM-facing description:
+            //   1. Operator-typed `display.mcp.description` (hard override).
+            //   2. apcore-toolkit `format_module(Markdown)` when
+            //      `rich_description` is on — gives the LLM a structured
+            //      tool description (parameters, returns, behavior table,
+            //      tags, examples) instead of a one-line summary.
+            //   3. Fallback to the plain `registry.describe()` text.
             let description = match mcp_display
                 .and_then(|d| d.get("description"))
                 .and_then(|v| v.as_str())
             {
                 Some(desc) => desc.to_string(),
+                None if self.rich_description => {
+                    crate::markdown::render_module_markdown(&descriptor, true)
+                }
                 None => base_description,
             };
 
@@ -1571,16 +1606,170 @@ mod tests {
         assert!(!AsyncTaskBridge::is_reserved_id("legitimate.module"));
     }
 
+    // -- apcore-toolkit 0.6+: rich Markdown tool descriptions ----------------
+
     #[test]
-    fn append_meta_tools_adds_four_reserved_names() {
+    fn build_tools_rich_description_renders_markdown() {
+        // When rich_description=true, factory replaces the plain
+        // `registry.describe()` text with apcore-toolkit
+        // `format_module(Markdown)` output — a structured tool description
+        // (parameters, returns, behavior table) packing more decision
+        // signal per token for LLMs.
+        use apcore::context::Context;
+        use apcore::module::{Module, ModuleAnnotations};
+        use apcore::registry::{registry::Registry, ModuleDescriptor};
+        use async_trait::async_trait;
+        use serde_json::json;
+
+        #[derive(Debug)]
+        struct DemoModule;
+
+        #[async_trait]
+        impl Module for DemoModule {
+            fn input_schema(&self) -> serde_json::Value {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "width": {"type": "integer"}
+                    },
+                    "required": ["width"]
+                })
+            }
+            fn output_schema(&self) -> serde_json::Value {
+                json!({"type": "object"})
+            }
+            fn description(&self) -> &str {
+                "Resize an image"
+            }
+            async fn execute(
+                &self,
+                _inputs: serde_json::Value,
+                _ctx: &Context<serde_json::Value>,
+            ) -> Result<serde_json::Value, apcore::errors::ModuleError> {
+                Ok(json!({}))
+            }
+        }
+
+        let registry = Registry::default();
+        let descriptor = ModuleDescriptor {
+            module_id: "image.resize".to_string(),
+            name: None,
+            description: "Resize an image".to_string(),
+            documentation: None,
+            input_schema: json!({
+                "type": "object",
+                "properties": {"width": {"type": "integer"}},
+                "required": ["width"]
+            }),
+            output_schema: json!({"type": "object"}),
+            version: "1.0.0".to_string(),
+            tags: vec!["image".to_string()],
+            annotations: Some(ModuleAnnotations::default()),
+            examples: vec![],
+            metadata: HashMap::new(),
+            display: None,
+            sunset_date: None,
+            dependencies: vec![],
+            enabled: true,
+        };
+        registry
+            .register("image.resize", Box::new(DemoModule), descriptor)
+            .expect("register module");
+
+        let factory = MCPServerFactory::with_rich_description(true);
+        let tools = factory.build_tools(&registry, None, None).unwrap();
+        assert_eq!(tools.len(), 1);
+        let desc = &tools[0].description;
+        assert!(
+            desc.starts_with("# "),
+            "rich description must be Markdown (start with '# '); got: {desc}"
+        );
+        assert!(
+            desc.contains("## Parameters"),
+            "rich description must include the Parameters section; got: {desc}"
+        );
+        // The original short description is embedded in the body.
+        assert!(
+            desc.contains("Resize an image"),
+            "Markdown body must embed the original description; got: {desc}"
+        );
+    }
+
+    #[test]
+    fn build_tools_rich_description_respects_display_override() {
+        // Operator-typed `display.mcp.description` wins even when
+        // rich_description is on.
+        use apcore::context::Context;
+        use apcore::module::{Module, ModuleAnnotations};
+        use apcore::registry::{registry::Registry, ModuleDescriptor};
+        use async_trait::async_trait;
+        use serde_json::json;
+
+        #[derive(Debug)]
+        struct DemoModule;
+
+        #[async_trait]
+        impl Module for DemoModule {
+            fn input_schema(&self) -> serde_json::Value {
+                json!({"type": "object"})
+            }
+            fn output_schema(&self) -> serde_json::Value {
+                json!({"type": "object"})
+            }
+            fn description(&self) -> &str {
+                "Resize an image"
+            }
+            async fn execute(
+                &self,
+                _inputs: serde_json::Value,
+                _ctx: &Context<serde_json::Value>,
+            ) -> Result<serde_json::Value, apcore::errors::ModuleError> {
+                Ok(json!({}))
+            }
+        }
+
+        let registry = Registry::default();
+        let descriptor = ModuleDescriptor {
+            module_id: "image.resize".to_string(),
+            name: None,
+            description: "Resize an image".to_string(),
+            documentation: None,
+            input_schema: json!({"type": "object"}),
+            output_schema: json!({"type": "object"}),
+            version: "1.0.0".to_string(),
+            tags: vec![],
+            annotations: Some(ModuleAnnotations::default()),
+            examples: vec![],
+            metadata: HashMap::new(),
+            display: Some(json!({
+                "mcp": {"description": "Operator-typed override"}
+            })),
+            sunset_date: None,
+            dependencies: vec![],
+            enabled: true,
+        };
+        registry
+            .register("image.resize", Box::new(DemoModule), descriptor)
+            .expect("register module");
+
+        let factory = MCPServerFactory::with_rich_description(true);
+        let tools = factory.build_tools(&registry, None, None).unwrap();
+        assert_eq!(tools[0].description, "Operator-typed override");
+    }
+
+    #[test]
+    fn append_meta_tools_adds_five_reserved_names() {
         let mut tools = Vec::new();
         MCPServerFactory::append_meta_tools(&mut tools);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names.len(), 4);
+        assert_eq!(names.len(), 5);
         assert!(names.contains(&"__apcore_task_submit"));
         assert!(names.contains(&"__apcore_task_status"));
         assert!(names.contains(&"__apcore_task_cancel"));
         assert!(names.contains(&"__apcore_task_list"));
+        // apcore 0.21 PROTOCOL_SPEC §5.6: predict state changes without
+        // executing.
+        assert!(names.contains(&"__apcore_module_preview"));
     }
 
     /// Regression test for [A-D-009].

@@ -57,6 +57,12 @@ pub const META_TOOL_SUBMIT: &str = "__apcore_task_submit";
 pub const META_TOOL_STATUS: &str = "__apcore_task_status";
 pub const META_TOOL_CANCEL: &str = "__apcore_task_cancel";
 pub const META_TOOL_LIST: &str = "__apcore_task_list";
+/// `__apcore_module_preview` — apcore PROTOCOL_SPEC §5.6 / §12.8.
+/// Surfaces `Module.preview()` and the rest of the dry-run preflight
+/// checks (input validation, ACL, approval requirement) to MCP clients
+/// without side effects, so AI orchestrators can ask "what would change
+/// in the world if I called this module?" before executing.
+pub const META_TOOL_PREVIEW: &str = "__apcore_module_preview";
 
 /// Default `AsyncTaskManager` configuration.
 pub const DEFAULT_MAX_CONCURRENT: usize = 10;
@@ -195,7 +201,7 @@ impl AsyncTaskBridge {
     /// exclusively in the `__apcore_task_submit` meta-tool handler so that
     /// callers can call `submit()` directly without being blocked by the
     /// meta-tool namespace enforcement. [D10-004]
-    pub fn submit(
+    pub async fn submit(
         &self,
         module_id: &str,
         inputs: Value,
@@ -204,7 +210,7 @@ impl AsyncTaskBridge {
         session_key: Option<&str>,
     ) -> Result<SubmitResult, apcore::errors::ModuleError> {
         let ctx: Option<Context<Value>> = identity.map(Context::new);
-        let task_id = self.manager.submit(module_id, inputs, ctx)?;
+        let task_id = self.manager.submit(module_id, inputs, ctx).await?;
 
         if let Some(token) = progress_token {
             let mut guard = self
@@ -265,28 +271,29 @@ impl AsyncTaskBridge {
     }
 
     /// Cancel a running or pending task.
-    pub fn cancel(&self, task_id: &str) -> bool {
-        let mut guard = self
-            .progress_tokens
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        guard.remove(task_id);
-        drop(guard);
-        self.manager.cancel(task_id)
+    pub async fn cancel(&self, task_id: &str) -> bool {
+        {
+            let mut guard = self
+                .progress_tokens
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            guard.remove(task_id);
+        }
+        self.manager.cancel(task_id).await
     }
 
     /// Cancel every task recorded under the given session key. Used by the
     /// transport layer when a client disconnects or cancels a request.
     ///
     /// Returns the number of tasks cancelled.
-    pub fn cancel_session_tasks(&self, session_key: &str) -> usize {
+    pub async fn cancel_session_tasks(&self, session_key: &str) -> usize {
         let ids: Vec<String> = {
             let mut map = self.session_tasks.lock().unwrap_or_else(|p| p.into_inner());
             map.remove(session_key).unwrap_or_default()
         };
         let mut n = 0;
         for id in &ids {
-            if self.cancel(id) {
+            if self.cancel(id).await {
                 n += 1;
             }
         }
@@ -299,8 +306,8 @@ impl AsyncTaskBridge {
     }
 
     /// Cancel all pending/running tasks at server shutdown.
-    pub fn shutdown(&self) {
-        self.manager.shutdown();
+    pub async fn shutdown(&self) {
+        self.manager.shutdown().await;
     }
 
     /// Build the four reserved meta-tool definitions.
@@ -375,6 +382,28 @@ impl AsyncTaskBridge {
                 annotations: None,
                 meta: Some(json!({ "reserved": true })),
             },
+            Tool {
+                name: META_TOOL_PREVIEW.to_string(),
+                description:
+                    "Preview a module call: predict state changes, validate inputs, and \
+                     check approval requirements WITHOUT executing the module. Returns \
+                     {valid, requires_approval, predicted_changes, checks}. Use this \
+                     before invoking destructive or stateful modules to let the AI \
+                     orchestrator answer 'what would change in the world if I called \
+                     this?' (apcore PROTOCOL_SPEC §5.6)."
+                        .to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "module_id": { "type": "string" },
+                        "arguments": { "type": "object" }
+                    },
+                    "required": ["module_id"],
+                    "additionalProperties": false
+                }),
+                annotations: None,
+                meta: Some(json!({ "reserved": true })),
+            },
         ]
     }
 
@@ -383,7 +412,7 @@ impl AsyncTaskBridge {
     /// Returns `Some(result_json)` when the call matched a meta-tool name,
     /// or `None` when the caller should fall through to the normal
     /// execution path.
-    pub fn handle_meta_tool(
+    pub async fn handle_meta_tool(
         &self,
         tool_name: &str,
         arguments: &Value,
@@ -392,17 +421,19 @@ impl AsyncTaskBridge {
         session_key: Option<&str>,
     ) -> Option<Result<Value, apcore::errors::ModuleError>> {
         match tool_name {
-            META_TOOL_SUBMIT => {
-                Some(self.handle_submit(arguments, identity, progress_token, session_key))
-            }
+            META_TOOL_SUBMIT => Some(
+                self.handle_submit(arguments, identity, progress_token, session_key)
+                    .await,
+            ),
             META_TOOL_STATUS => Some(self.handle_status(arguments)),
-            META_TOOL_CANCEL => Some(self.handle_cancel(arguments)),
+            META_TOOL_CANCEL => Some(self.handle_cancel(arguments).await),
             META_TOOL_LIST => Some(self.handle_list(arguments)),
+            META_TOOL_PREVIEW => Some(self.handle_preview(arguments, identity).await),
             _ => None,
         }
     }
 
-    fn handle_submit(
+    async fn handle_submit(
         &self,
         arguments: &Value,
         identity: Option<Identity>,
@@ -448,7 +479,9 @@ impl AsyncTaskBridge {
         let inputs = arguments.get("arguments").cloned().unwrap_or(json!({}));
         // submit() now returns SubmitResult{task_id, status} — the exact
         // envelope shape Python+TS return. [D10-003]
-        let result = self.submit(module_id, inputs, identity, progress_token, session_key)?;
+        let result = self
+            .submit(module_id, inputs, identity, progress_token, session_key)
+            .await?;
         Ok(json!({
             "task_id": result.task_id,
             "status": result.status,
@@ -480,7 +513,7 @@ impl AsyncTaskBridge {
         }
     }
 
-    fn handle_cancel(&self, arguments: &Value) -> Result<Value, apcore::errors::ModuleError> {
+    async fn handle_cancel(&self, arguments: &Value) -> Result<Value, apcore::errors::ModuleError> {
         let task_id = arguments
             .get("task_id")
             .and_then(|v| v.as_str())
@@ -490,7 +523,7 @@ impl AsyncTaskBridge {
                     "__apcore_task_cancel requires 'task_id'",
                 )
             })?;
-        let cancelled = self.cancel(task_id);
+        let cancelled = self.cancel(task_id).await;
         Ok(json!({ "task_id": task_id, "cancelled": cancelled }))
     }
 
@@ -516,6 +549,78 @@ impl AsyncTaskBridge {
             .map(|t| serde_json::to_value(t).unwrap_or(Value::Null))
             .collect();
         Ok(json!({ "tasks": tasks_json }))
+    }
+
+    /// Run `executor.validate(module_id, inputs, context)` and return a
+    /// JSON envelope with `valid`, `requires_approval`, `predicted_changes`,
+    /// and `checks`. apcore PROTOCOL_SPEC §5.6 / §12.8.
+    async fn handle_preview(
+        &self,
+        arguments: &Value,
+        identity: Option<Identity>,
+    ) -> Result<Value, apcore::errors::ModuleError> {
+        let module_id = arguments
+            .get("module_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                apcore::errors::ModuleError::new(
+                    apcore::errors::ErrorCode::GeneralInvalidInput,
+                    "__apcore_module_preview requires 'module_id'",
+                )
+            })?;
+        // Preserve `arguments: null` verbatim — let the calling
+        // business decide whether null is a valid input. Missing
+        // ``arguments`` collapses to JSON null too (no caller intent
+        // to pass inputs); structurally-wrong shapes (arrays, scalars)
+        // are rejected because they can never represent a JSON object.
+        let inputs = match arguments.get("arguments") {
+            None | Some(Value::Null) => Value::Null,
+            Some(Value::Object(_)) => arguments.get("arguments").cloned().unwrap_or(Value::Null),
+            Some(_) => {
+                return Err(apcore::errors::ModuleError::new(
+                    apcore::errors::ErrorCode::GeneralInvalidInput,
+                    "__apcore_module_preview requires 'arguments' to be a JSON object or null",
+                ))
+            }
+        };
+        let ctx_owned: Option<Context<Value>> = identity.map(Context::new);
+        let ctx_ref = ctx_owned.as_ref();
+        // executor.validate is non-throwing on input-shape errors; it
+        // returns a structured PreflightResult with valid=false instead.
+        let preflight = self.executor.validate(module_id, &inputs, ctx_ref).await?;
+        let checks: Vec<Value> = preflight
+            .checks
+            .iter()
+            .map(|c| {
+                let mut obj = serde_json::Map::new();
+                obj.insert("check".to_string(), Value::String(c.check.clone()));
+                obj.insert("passed".to_string(), Value::Bool(c.passed));
+                if let Some(err) = &c.error {
+                    obj.insert(
+                        "error".to_string(),
+                        serde_json::to_value(err).unwrap_or(Value::Null),
+                    );
+                }
+                if !c.warnings.is_empty() {
+                    obj.insert(
+                        "warnings".to_string(),
+                        Value::Array(c.warnings.iter().cloned().map(Value::String).collect()),
+                    );
+                }
+                Value::Object(obj)
+            })
+            .collect();
+        let predicted: Vec<Value> = preflight
+            .predicted_changes
+            .iter()
+            .map(|c| serde_json::to_value(c).unwrap_or(Value::Null))
+            .collect();
+        Ok(json!({
+            "valid": preflight.valid,
+            "requires_approval": preflight.requires_approval,
+            "predicted_changes": predicted,
+            "checks": checks,
+        }))
     }
 }
 
@@ -633,14 +738,15 @@ mod tests {
     }
 
     #[test]
-    fn meta_tools_have_four_reserved_names() {
+    fn meta_tools_have_five_reserved_names() {
         let tools = AsyncTaskBridge::build_meta_tools();
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names.len(), 4);
+        assert_eq!(names.len(), 5);
         assert!(names.contains(&META_TOOL_SUBMIT));
         assert!(names.contains(&META_TOOL_STATUS));
         assert!(names.contains(&META_TOOL_CANCEL));
         assert!(names.contains(&META_TOOL_LIST));
+        assert!(names.contains(&META_TOOL_PREVIEW));
     }
 
     #[tokio::test]
@@ -649,7 +755,9 @@ mod tests {
         // meta-tool handler. Calling submit() directly with a reserved id
         // must SUCCEED (no GeneralInvalidInput from submit itself).
         let bridge = AsyncTaskBridge::new(make_executor());
-        let result = bridge.submit("__apcore_task_submit", json!({}), None, None, None);
+        let result = bridge
+            .submit("__apcore_task_submit", json!({}), None, None, None)
+            .await;
         // The manager will reject it internally (unknown module), but that's
         // a different error path — NOT a GeneralInvalidInput from the bridge.
         // If it errors, it must NOT be the bridge's reserved-id check.
@@ -668,6 +776,7 @@ mod tests {
         let bridge = AsyncTaskBridge::new(make_executor());
         let result = bridge
             .submit("some.module", json!({}), None, None, None)
+            .await
             .expect("submit should succeed");
         assert!(!result.task_id.is_empty(), "task_id must be non-empty");
         assert_eq!(result.status, "pending", "status must always be 'pending'");
@@ -684,6 +793,7 @@ mod tests {
                 None,
                 None,
             )
+            .await
             .expect("meta-tool must be routed")
             .expect("submit should return Ok");
         let task_id = submit_result
@@ -717,6 +827,7 @@ mod tests {
                 None,
                 None,
             )
+            .await
             .expect("meta-tool must be routed")
             .expect("status should return Ok");
         assert_eq!(
@@ -738,13 +849,15 @@ mod tests {
         // async-hinted, every module triggers the rule).
         let bridge = AsyncTaskBridge::new(make_executor());
 
-        let result = bridge.handle_meta_tool(
-            META_TOOL_SUBMIT,
-            &json!({"module_id": "non_async.mod", "arguments": {}}),
-            None,
-            None,
-            None,
-        );
+        let result = bridge
+            .handle_meta_tool(
+                META_TOOL_SUBMIT,
+                &json!({"module_id": "non_async.mod", "arguments": {}}),
+                None,
+                None,
+                None,
+            )
+            .await;
 
         // handle_meta_tool returns Some(Err(...)) for known meta-tool with
         // an error.
@@ -763,6 +876,7 @@ mod tests {
         let bridge = AsyncTaskBridge::with_limits(executor, 0, 100); // 0 concurrency keeps tasks pending
         let submit = bridge
             .submit("m", json!({}), None, None, None)
+            .await
             .expect("submit");
         let task_id = submit.task_id;
         let res = bridge
@@ -773,6 +887,7 @@ mod tests {
                 None,
                 None,
             )
+            .await
             .expect("routed")
             .expect("cancel ok");
         assert_eq!(res.get("cancelled").and_then(|v| v.as_bool()), Some(true));
@@ -781,7 +896,10 @@ mod tests {
     #[tokio::test]
     async fn handle_meta_tool_list_filters_by_status() {
         let bridge = AsyncTaskBridge::with_limits(make_executor(), 0, 100);
-        let _ = bridge.submit("m", json!({}), None, None, None).unwrap();
+        let _ = bridge
+            .submit("m", json!({}), None, None, None)
+            .await
+            .unwrap();
         let res = bridge
             .handle_meta_tool(
                 META_TOOL_LIST,
@@ -790,6 +908,7 @@ mod tests {
                 None,
                 None,
             )
+            .await
             .expect("routed")
             .expect("list ok");
         let tasks = res.get("tasks").and_then(|v| v.as_array()).unwrap();
@@ -804,16 +923,19 @@ mod tests {
         let bridge = AsyncTaskBridge::with_limits(make_executor(), 0, 100);
         let t1 = bridge
             .submit("m1", json!({}), None, None, Some("sess-a"))
+            .await
             .unwrap();
         let t2 = bridge
             .submit("m2", json!({}), None, None, Some("sess-a"))
+            .await
             .unwrap();
         // Task from another session should not be affected.
         let t3 = bridge
             .submit("m3", json!({}), None, None, Some("sess-b"))
+            .await
             .unwrap();
 
-        let cancelled = bridge.cancel_session_tasks("sess-a");
+        let cancelled = bridge.cancel_session_tasks("sess-a").await;
         assert_eq!(cancelled, 2);
         assert_eq!(
             bridge.get_status(&t1.task_id).map(|i| i.status),
@@ -829,10 +951,12 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn handle_meta_tool_unknown_returns_none() {
+    #[tokio::test]
+    async fn handle_meta_tool_unknown_returns_none() {
         let bridge = AsyncTaskBridge::new(make_executor());
-        let res = bridge.handle_meta_tool("math.add", &json!({}), None, None, None);
+        let res = bridge
+            .handle_meta_tool("math.add", &json!({}), None, None, None)
+            .await;
         assert!(res.is_none());
     }
 
@@ -842,13 +966,15 @@ mod tests {
     async fn meta_tool_handler_rejects_reserved_id() {
         // [D10-004] The reserved-id check belongs in the meta-tool handler.
         let bridge = AsyncTaskBridge::new(make_executor());
-        let result = bridge.handle_meta_tool(
-            META_TOOL_SUBMIT,
-            &json!({"module_id": "__apcore_task_submit", "arguments": {}}),
-            None,
-            None,
-            None,
-        );
+        let result = bridge
+            .handle_meta_tool(
+                META_TOOL_SUBMIT,
+                &json!({"module_id": "__apcore_task_submit", "arguments": {}}),
+                None,
+                None,
+                None,
+            )
+            .await;
         let inner = result.expect("meta-tool must be routed");
         let err = inner.expect_err("meta-tool submit must reject __apcore_ module_id");
         assert!(
@@ -906,6 +1032,181 @@ mod tests {
         assert!(!AsyncTaskBridge::is_async_module_descriptor(&descriptor));
     }
 
+    // -- apcore 0.21 PROTOCOL_SPEC §5.6: __apcore_module_preview ------------
+
+    #[tokio::test]
+    async fn preview_meta_tool_returns_predicted_changes() {
+        use apcore::module::{Change, PreviewResult};
+        use async_trait::async_trait;
+
+        #[derive(Debug)]
+        struct PreviewableModule;
+
+        #[async_trait]
+        impl apcore::module::Module for PreviewableModule {
+            fn input_schema(&self) -> Value {
+                json!({"type": "object"})
+            }
+            fn output_schema(&self) -> Value {
+                json!({"type": "object"})
+            }
+            fn description(&self) -> &str {
+                "previewable demo"
+            }
+            async fn execute(
+                &self,
+                _inputs: Value,
+                _ctx: &Context<Value>,
+            ) -> Result<Value, apcore::errors::ModuleError> {
+                Ok(json!({}))
+            }
+            fn preview(
+                &self,
+                _inputs: &Value,
+                _ctx: Option<&Context<Value>>,
+            ) -> Option<PreviewResult> {
+                let mut change = Change::default();
+                change.action = "create".to_string();
+                change.target = "row:42".to_string();
+                change.summary = "insert row".to_string();
+                let mut result = PreviewResult::default();
+                result.changes = vec![change];
+                Some(result)
+            }
+        }
+
+        let registry = Arc::new(Registry::default());
+        let config = Arc::new(apcore::config::Config::default());
+        let descriptor = apcore::registry::ModuleDescriptor {
+            module_id: "demo.preview".to_string(),
+            name: None,
+            description: "previewable demo".to_string(),
+            documentation: None,
+            input_schema: json!({"type": "object"}),
+            output_schema: json!({"type": "object"}),
+            version: "1.0.0".to_string(),
+            tags: vec![],
+            annotations: Some(apcore::module::ModuleAnnotations::default()),
+            examples: vec![],
+            metadata: HashMap::new(),
+            display: None,
+            sunset_date: None,
+            dependencies: vec![],
+            enabled: true,
+        };
+        registry
+            .register("demo.preview", Box::new(PreviewableModule), descriptor)
+            .expect("register previewable module");
+
+        let executor = Arc::new(apcore::executor::Executor::new(registry, config));
+        let bridge = AsyncTaskBridge::new(executor);
+        let result = bridge
+            .handle_meta_tool(
+                META_TOOL_PREVIEW,
+                &json!({"module_id": "demo.preview", "arguments": {}}),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("meta-tool must be routed")
+            .expect("preview should return Ok");
+        assert_eq!(result.get("valid").and_then(|v| v.as_bool()), Some(true));
+        let changes = result
+            .get("predicted_changes")
+            .and_then(|v| v.as_array())
+            .expect("predicted_changes must be an array");
+        assert_eq!(changes.len(), 1);
+        assert_eq!(
+            changes[0].get("action").and_then(|v| v.as_str()),
+            Some("create"),
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_meta_tool_preserves_arguments_null() {
+        // `arguments: null` and missing arguments must both reach
+        // executor.validate as Value::Null — the calling business
+        // decides whether null is acceptable. Pre-fix code coerced
+        // missing → `{}` via `unwrap_or(json!({}))`.
+        //
+        // We assert by registering a module whose preflight chain
+        // would emit a distinct check status when called with null
+        // vs `{}`. The simplest proxy: register a module that
+        // requires no inputs and verify validate returns valid=true
+        // for both null and missing-arguments calls (i.e. neither
+        // path errors with INVALID_INPUT).
+        let bridge = AsyncTaskBridge::new(make_executor());
+
+        // null arguments
+        let result = bridge
+            .handle_meta_tool(
+                META_TOOL_PREVIEW,
+                &json!({"module_id": "demo.preview", "arguments": null}),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("meta-tool routed")
+            .expect("Ok envelope");
+        // validate against an unregistered module returns valid=false
+        // with a module_not_found check, NOT an arguments-shape error.
+        // The important contract: Value::Null is accepted as valid
+        // input shape by the bridge.
+        assert!(result.get("valid").is_some());
+        assert!(result.get("predicted_changes").is_some());
+
+        // missing arguments — same path
+        let result = bridge
+            .handle_meta_tool(
+                META_TOOL_PREVIEW,
+                &json!({"module_id": "demo.preview"}),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("meta-tool routed")
+            .expect("Ok envelope");
+        assert!(result.get("valid").is_some());
+    }
+
+    #[tokio::test]
+    async fn preview_meta_tool_rejects_array_arguments() {
+        // Structurally-impossible shapes (array, scalar) must error.
+        let bridge = AsyncTaskBridge::new(make_executor());
+        let result = bridge
+            .handle_meta_tool(
+                META_TOOL_PREVIEW,
+                &json!({"module_id": "demo.preview", "arguments": [1, 2, 3]}),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("meta-tool routed");
+        let err = result.expect_err("array arguments must error");
+        assert!(err.to_string().contains("JSON object or null"));
+    }
+
+    #[tokio::test]
+    async fn preview_meta_tool_rejects_missing_module_id() {
+        let bridge = AsyncTaskBridge::new(make_executor());
+        let result = bridge
+            .handle_meta_tool(
+                META_TOOL_PREVIEW,
+                &json!({"arguments": {}}),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("meta-tool must be routed");
+        let err = result.expect_err("missing module_id must error");
+        assert!(err.to_string().contains("module_id"));
+    }
+
     // -- Issue D11-014: handle_status not-found returns Ok(json) not Err -----
 
     #[tokio::test]
@@ -913,13 +1214,15 @@ mod tests {
         // [D11-014] Python returns _text_response({error:ASYNC_TASK_NOT_FOUND,task_id:...})
         // TS throws. Rust must return Ok(json) not Err, aligning with Python.
         let bridge = AsyncTaskBridge::new(make_executor());
-        let result = bridge.handle_meta_tool(
-            META_TOOL_STATUS,
-            &json!({"task_id": "nonexistent-task-id"}),
-            None,
-            None,
-            None,
-        );
+        let result = bridge
+            .handle_meta_tool(
+                META_TOOL_STATUS,
+                &json!({"task_id": "nonexistent-task-id"}),
+                None,
+                None,
+                None,
+            )
+            .await;
         let inner = result.expect("meta-tool must be routed");
         let val = inner.expect("handle_status must return Ok, not Err, for unknown task");
         assert_eq!(

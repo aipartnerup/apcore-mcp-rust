@@ -67,6 +67,10 @@ pub enum ErrorCode {
     BindingSchemaModeConflict,
     BindingStrictSchemaIncompatible,
     BindingPolicyViolation,
+    // apcore 0.20.0 sync alignment A-001: CircuitBreakerMiddleware
+    // emits CIRCUIT_BREAKER_OPEN when the breaker is in the OPEN state.
+    // Cross-SDK parity with Python+TS ERROR_CODES.
+    CircuitBreakerOpen,
 }
 
 /// Registry lifecycle events.
@@ -162,7 +166,7 @@ mod tests {
     fn error_code_count() {
         // Intentional guard: update this count when adding new error codes
         // to ensure the strum EnumIter derivation stays in sync.
-        assert_eq!(ErrorCode::iter().count(), 35);
+        assert_eq!(ErrorCode::iter().count(), 36);
     }
 
     #[test]
@@ -294,6 +298,7 @@ mod tests {
             "BINDING_SCHEMA_MODE_CONFLICT",
             "BINDING_STRICT_SCHEMA_INCOMPATIBLE",
             "BINDING_POLICY_VIOLATION",
+            "CIRCUIT_BREAKER_OPEN",
         ];
         for code_str in &python_codes {
             let parsed: ErrorCode = code_str

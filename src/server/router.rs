@@ -821,13 +821,16 @@ impl ExecutionRouter {
                 .identity
                 .as_ref()
                 .and_then(|v| serde_json::from_value::<apcore::Identity>(v.clone()).ok());
-            if let Some(result) = bridge.handle_meta_tool(
-                tool_name,
-                arguments,
-                resolved_identity.clone(),
-                progress_token_val.clone(),
-                session_key.as_deref(),
-            ) {
+            if let Some(result) = bridge
+                .handle_meta_tool(
+                    tool_name,
+                    arguments,
+                    resolved_identity.clone(),
+                    progress_token_val.clone(),
+                    session_key.as_deref(),
+                )
+                .await
+            {
                 return Self::meta_tool_response(result, &apcore_ctx);
             }
             // Async-hint dispatch: dynamic descriptor lookup against the
@@ -836,13 +839,15 @@ impl ExecutionRouter {
             // registration) — the pre-fix static `async_module_ids` set
             // was frozen at startup and stale on mutations. [A-D-031]
             if bridge.is_async_module_registered_self(tool_name) {
-                let res = bridge.submit(
-                    tool_name,
-                    arguments.clone(),
-                    resolved_identity,
-                    progress_token_val,
-                    session_key.as_deref(),
-                );
+                let res = bridge
+                    .submit(
+                        tool_name,
+                        arguments.clone(),
+                        resolved_identity,
+                        progress_token_val,
+                        session_key.as_deref(),
+                    )
+                    .await;
                 // Wrap into the spec envelope `{task_id, status: "pending"}`
                 // rather than serialising the full TaskInfo. [A-D-007] —
                 // matches what the meta-tool path does in handle_submit.

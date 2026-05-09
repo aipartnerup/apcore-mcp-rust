@@ -2,11 +2,13 @@
 
 use std::collections::HashMap;
 
-use apcore::module::ModuleAnnotations;
+use apcore::module::{ModuleAnnotations, ModuleExample};
 use apcore::registry::registry::Registry;
+use apcore_toolkit::ScannedModule;
 use serde_json::Value;
 
 use crate::adapters::{AdapterError, AnnotationMapper, ModuleIDNormalizer, SchemaConverter};
+use crate::markdown;
 
 // ---- Error type -------------------------------------------------------------
 
@@ -20,6 +22,68 @@ pub enum ConverterError {
     /// Strict mode transformation failed.
     #[error("strict mode conversion failed: {0}")]
     StrictMode(String),
+}
+
+// ---- Convert options --------------------------------------------------------
+
+/// Options for the `*_with_options` variants of [`OpenAIConverter`] methods.
+///
+/// Constructed via [`ConvertOptions::default`] or [`ConvertOptions::new`]
+/// + the chainable setters. Each setter returns `Self` so callers can
+///   build the options inline:
+///
+/// ```ignore
+/// let tools = converter.convert_registry_with_options(
+///     &registry_json,
+///     ConvertOptions::default()
+///         .with_embed_annotations(true)
+///         .with_rich_description(true),
+///     None,
+///     None,
+/// )?;
+/// ```
+///
+/// The fieldful options struct exists so adding cross-cutting flags
+/// (currently `rich_description`, future possibilities like
+/// `embed_examples`, `compact_schema`) doesn't ratchet the positional
+/// signature of every public method.
+#[derive(Debug, Clone, Default)]
+pub struct ConvertOptions {
+    /// Append annotation hints (e.g. `[idempotent]`) to the description.
+    pub embed_annotations: bool,
+    /// Apply OpenAI strict-mode transformations to the schema.
+    pub strict: bool,
+    /// Replace the plain ``description`` with a Markdown body rendered
+    /// by `apcore_toolkit::format_module(Markdown)` — title,
+    /// description, parameters, returns, behavior table, tags,
+    /// examples. LLMs select tools primarily from this string;
+    /// Markdown packs more decision-relevant signal per token.
+    pub rich_description: bool,
+}
+
+impl ConvertOptions {
+    /// Construct with all flags off (same as `Default`).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Toggle annotation embedding.
+    pub fn with_embed_annotations(mut self, embed: bool) -> Self {
+        self.embed_annotations = embed;
+        self
+    }
+
+    /// Toggle OpenAI strict mode.
+    pub fn with_strict(mut self, strict: bool) -> Self {
+        self.strict = strict;
+        self
+    }
+
+    /// Toggle Markdown rendering of `description`.
+    pub fn with_rich_description(mut self, rich: bool) -> Self {
+        self.rich_description = rich;
+        self
+    }
 }
 
 // ---- OpenAIConverter --------------------------------------------------------
@@ -65,6 +129,26 @@ impl OpenAIConverter {
         tags: Option<&[&str]>,
         prefix: Option<&str>,
     ) -> Result<Vec<Value>, ConverterError> {
+        self.convert_registry_apcore_with_options(
+            registry,
+            ConvertOptions::default()
+                .with_embed_annotations(embed_annotations)
+                .with_strict(strict),
+            tags,
+            prefix,
+        )
+    }
+
+    /// Like [`Self::convert_registry_apcore`] but takes a [`ConvertOptions`]
+    /// struct, supporting `rich_description` for Markdown-rendered tool
+    /// descriptions (apcore-toolkit `format_module(Markdown)`).
+    pub fn convert_registry_apcore_with_options(
+        &self,
+        registry: &Registry,
+        options: ConvertOptions,
+        tags: Option<&[&str]>,
+        prefix: Option<&str>,
+    ) -> Result<Vec<Value>, ConverterError> {
         let module_ids = registry.list(tags, prefix);
         let mut tools = Vec::new();
         let mut seen_names: HashMap<String, String> = HashMap::new();
@@ -76,19 +160,31 @@ impl OpenAIConverter {
             let Some(descriptor) = registry.get_definition(module_id) else {
                 continue;
             };
-            let description = descriptor.description.clone();
+            // Description sourcing: when `rich_description` is on we
+            // delegate straight to the markdown helper which has direct
+            // access to the real `ModuleDescriptor` (including
+            // documentation, examples, display overlay) — strictly
+            // richer than the JSON-projection path. Otherwise fall back
+            // to the descriptor's plain `description` field.
+            let description = if options.rich_description {
+                markdown::render_module_markdown(&descriptor, true)
+            } else {
+                descriptor.description.clone()
+            };
             // Build a JSON Value from the descriptor for convert_descriptor.
+            // We pass `rich_description: false` here because the description
+            // is already finalized above.
             let descriptor_json = serde_json::json!({
                 "input_schema": descriptor.input_schema,
                 "annotations": descriptor.annotations,
                 "tags": descriptor.tags,
             });
-            let tool = self.convert_descriptor(
+            let inner_options = options.clone().with_rich_description(false);
+            let tool = self.convert_descriptor_with_options(
                 module_id,
                 &descriptor_json,
                 &description,
-                embed_annotations,
-                strict,
+                inner_options,
             )?;
             let tool_name = tool
                 .get("function")
@@ -130,6 +226,28 @@ impl OpenAIConverter {
         registry: &Value,
         embed_annotations: bool,
         strict: bool,
+        tags: Option<&[&str]>,
+        prefix: Option<&str>,
+    ) -> Result<Vec<Value>, ConverterError> {
+        self.convert_registry_with_options(
+            registry,
+            ConvertOptions::default()
+                .with_embed_annotations(embed_annotations)
+                .with_strict(strict),
+            tags,
+            prefix,
+        )
+    }
+
+    /// Like [`Self::convert_registry`] but takes a [`ConvertOptions`]
+    /// struct, supporting `rich_description` for Markdown-rendered tool
+    /// descriptions. The JSON entry for each module is adapted to a
+    /// transient [`ScannedModule`] via [`json_entry_to_scanned_module`]
+    /// before delegating to `apcore_toolkit::format_module(Markdown)`.
+    pub fn convert_registry_with_options(
+        &self,
+        registry: &Value,
+        options: ConvertOptions,
         tags: Option<&[&str]>,
         prefix: Option<&str>,
     ) -> Result<Vec<Value>, ConverterError> {
@@ -175,13 +293,42 @@ impl OpenAIConverter {
                 }
             }
 
-            let description = entry
+            let plain_description = entry
                 .get("description")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
-            let tool =
-                self.convert_descriptor(module_id, entry, description, embed_annotations, strict)?;
+            // When rich_description is on, project the JSON entry into a
+            // transient ScannedModule and delegate to apcore-toolkit's
+            // `format_module(Markdown)`. This is the JSON-path equivalent
+            // of what `convert_registry_apcore_with_options` does with
+            // a real `ModuleDescriptor`. The toolkit's Markdown style
+            // gracefully handles missing fields (empty `## Examples`,
+            // empty `## Behavior` table) so a sparse JSON entry still
+            // produces a usable rendering.
+            let description: String = if options.rich_description {
+                let scanned = json_entry_to_scanned_module(module_id, entry);
+                match apcore_toolkit::format_module(
+                    &scanned,
+                    apcore_toolkit::ModuleStyle::Markdown,
+                    true,
+                ) {
+                    apcore_toolkit::FormatOutput::Text(text) => text,
+                    _ => plain_description.to_string(),
+                }
+            } else {
+                plain_description.to_string()
+            };
+
+            // Pass rich_description=false to the inner call — the
+            // description is already finalized above.
+            let inner_options = options.clone().with_rich_description(false);
+            let tool = self.convert_descriptor_with_options(
+                module_id,
+                entry,
+                &description,
+                inner_options,
+            )?;
             // Extract the function name from the tool envelope.
             let tool_name = tool
                 .get("function")
@@ -226,6 +373,28 @@ impl OpenAIConverter {
         embed_annotations: bool,
         strict: bool,
     ) -> Result<Value, ConverterError> {
+        self.convert_descriptor_with_options(
+            name,
+            descriptor,
+            description,
+            ConvertOptions::default()
+                .with_embed_annotations(embed_annotations)
+                .with_strict(strict),
+        )
+    }
+
+    /// Like [`Self::convert_descriptor`] but takes a [`ConvertOptions`]
+    /// struct. When `options.rich_description` is set the supplied
+    /// `description` is replaced by `apcore_toolkit::format_module`
+    /// Markdown rendering of a transient ScannedModule projected from
+    /// the JSON `descriptor`.
+    pub fn convert_descriptor_with_options(
+        &self,
+        name: &str,
+        descriptor: &Value,
+        description: &str,
+        options: ConvertOptions,
+    ) -> Result<Value, ConverterError> {
         // Normalize the module ID (dot -> dash)
         let normalized_name = ModuleIDNormalizer::normalize(name)?;
 
@@ -238,9 +407,24 @@ impl OpenAIConverter {
         // opt-in separately. MCP tool schemas in factory.rs use strict mode.
         let mut parameters = SchemaConverter::convert_input_schema_strict(&input_schema, false)?;
 
-        // Build description with optional annotation suffix
-        let mut desc = description.to_string();
-        if embed_annotations {
+        // Resolve the LLM-facing description. `rich_description` swaps
+        // the supplied plain description for a Markdown body rendered
+        // via `apcore_toolkit::format_module`. The annotation suffix is
+        // appended afterwards as a strict superset.
+        let mut desc = if options.rich_description {
+            let scanned = json_entry_to_scanned_module(name, descriptor);
+            match apcore_toolkit::format_module(
+                &scanned,
+                apcore_toolkit::ModuleStyle::Markdown,
+                true,
+            ) {
+                apcore_toolkit::FormatOutput::Text(text) => text,
+                _ => description.to_string(),
+            }
+        } else {
+            description.to_string()
+        };
+        if options.embed_annotations {
             // Deserialize annotations from the descriptor JSON into ModuleAnnotations
             let annotations: Option<ModuleAnnotations> = descriptor
                 .get("annotations")
@@ -250,7 +434,7 @@ impl OpenAIConverter {
         }
 
         // Apply strict mode if requested
-        if strict {
+        if options.strict {
             parameters = Self::apply_strict_mode(&parameters);
         }
 
@@ -261,7 +445,7 @@ impl OpenAIConverter {
             "parameters": parameters,
         });
 
-        if strict {
+        if options.strict {
             function["strict"] = serde_json::json!(true);
         }
 
@@ -486,6 +670,88 @@ impl OpenAIConverter {
 impl Default for OpenAIConverter {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ---- JSON → ScannedModule adapter -------------------------------------------
+
+/// Project a JSON entry from the duck-typed registry-as-JSON form
+/// (`{module_id: {description, input_schema, output_schema?, annotations,
+/// tags, examples?, metadata?, ...}}`) into an `apcore_toolkit::ScannedModule`
+/// suitable for `format_module` Markdown rendering.
+///
+/// This is the adapter that lets [`OpenAIConverter::convert_registry`] —
+/// the JSON path — opt in to `rich_description=true` even though it
+/// doesn't have a real [`apcore::registry::ModuleDescriptor`] in hand.
+/// Missing fields fall back to sensible defaults so the toolkit's
+/// markdown sections (`## Parameters`, `## Returns`, `## Behavior`,
+/// `## Tags`, `## Examples`) gracefully render whatever the entry
+/// actually carries.
+pub fn json_entry_to_scanned_module(module_id: &str, entry: &Value) -> ScannedModule {
+    let description = entry
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let input_schema = entry
+        .get("input_schema")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let output_schema = entry
+        .get("output_schema")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let tags: Vec<String> = entry
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| t.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let version = entry
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("1.0.0")
+        .to_string();
+    let annotations: Option<ModuleAnnotations> = entry
+        .get("annotations")
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+    let documentation = entry
+        .get("documentation")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let examples: Vec<ModuleExample> = entry
+        .get("examples")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| serde_json::from_value(e.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let metadata: HashMap<String, Value> = entry
+        .get("metadata")
+        .and_then(|v| v.as_object())
+        .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default();
+    let display = entry.get("display").cloned();
+    ScannedModule {
+        module_id: module_id.to_string(),
+        description,
+        input_schema,
+        output_schema,
+        tags,
+        target: String::new(),
+        version,
+        annotations,
+        documentation,
+        suggested_alias: None,
+        examples,
+        metadata,
+        display,
+        warnings: vec![],
     }
 }
 
@@ -1763,5 +2029,213 @@ mod tests {
             !formatted.contains("key: "),
             "must NOT be Rust debug repr: {formatted}"
         );
+    }
+
+    // ---- rich_description (apcore-toolkit 0.6+ format_module integration) ---
+
+    #[test]
+    fn json_entry_to_scanned_module_copies_overlapping_fields() {
+        // The JSON-entry adapter is the primitive that lets the
+        // duck-typed `convert_registry` JSON path drive
+        // `format_module(Markdown)`. Every field copied must round-trip.
+        let entry = json!({
+            "description": "Resize an image",
+            "input_schema": {
+                "type": "object",
+                "properties": {"width": {"type": "integer"}},
+                "required": ["width"]
+            },
+            "output_schema": {"type": "object"},
+            "tags": ["image", "transform"],
+            "version": "2.0.0",
+            "annotations": {"idempotent": true},
+            "documentation": "Long-form docs",
+            "examples": [],
+            "metadata": {"http_method": "POST"}
+        });
+        let scanned = json_entry_to_scanned_module("image.resize", &entry);
+        assert_eq!(scanned.module_id, "image.resize");
+        assert_eq!(scanned.description, "Resize an image");
+        assert_eq!(scanned.tags, vec!["image", "transform"]);
+        assert_eq!(scanned.version, "2.0.0");
+        assert_eq!(scanned.documentation.as_deref(), Some("Long-form docs"));
+        assert_eq!(
+            scanned.metadata.get("http_method").and_then(|v| v.as_str()),
+            Some("POST")
+        );
+    }
+
+    #[test]
+    fn json_entry_to_scanned_module_uses_defaults_for_missing_fields() {
+        // Sparse entry — toolkit's markdown render handles empty
+        // sections gracefully; the adapter just needs to not blow up.
+        let entry = json!({
+            "description": "Minimal",
+            "input_schema": {"type": "object"}
+        });
+        let scanned = json_entry_to_scanned_module("min.module", &entry);
+        assert_eq!(scanned.version, "1.0.0");
+        assert!(scanned.tags.is_empty());
+        assert!(scanned.examples.is_empty());
+        assert!(scanned.documentation.is_none());
+    }
+
+    #[test]
+    fn convert_descriptor_with_options_rich_description_renders_markdown() {
+        // The JSON-path convert_descriptor with rich_description=true
+        // must replace the supplied plain description with toolkit
+        // Markdown — same byte-equivalent rendering the
+        // ModuleDescriptor path produces.
+        let converter = OpenAIConverter::new();
+        let descriptor = json!({
+            "description": "Resize an image",
+            "input_schema": {
+                "type": "object",
+                "properties": {"width": {"type": "integer"}},
+                "required": ["width"]
+            },
+            "tags": ["image"]
+        });
+        let tool = converter
+            .convert_descriptor_with_options(
+                "image.resize",
+                &descriptor,
+                "Resize an image",
+                ConvertOptions::default().with_rich_description(true),
+            )
+            .expect("convert with rich_description");
+        let desc = tool
+            .get("function")
+            .and_then(|f| f.get("description"))
+            .and_then(|d| d.as_str())
+            .unwrap_or("");
+        assert!(
+            desc.starts_with("# "),
+            "rich description must be Markdown (start with '# '); got: {desc}"
+        );
+        assert!(
+            desc.contains("## Parameters"),
+            "Markdown must include the Parameters section; got: {desc}"
+        );
+        assert!(
+            desc.contains("Resize an image"),
+            "Markdown must embed the original description; got: {desc}"
+        );
+    }
+
+    #[test]
+    fn convert_registry_with_options_rich_description_propagates_to_every_tool() {
+        // rich_description on the JSON-path convert_registry must
+        // render Markdown for every emitted tool — proving
+        // json_entry_to_scanned_module sees per-entry data.
+        let converter = OpenAIConverter::new();
+        let registry = json!({
+            "demo.one": {
+                "description": "First demo",
+                "input_schema": {"type": "object"},
+                "tags": []
+            },
+            "demo.two": {
+                "description": "Second demo",
+                "input_schema": {"type": "object"},
+                "tags": []
+            }
+        });
+        let tools = converter
+            .convert_registry_with_options(
+                &registry,
+                ConvertOptions::default().with_rich_description(true),
+                None,
+                None,
+            )
+            .expect("convert_registry with rich_description");
+        assert_eq!(tools.len(), 2);
+        for tool in &tools {
+            let desc = tool
+                .get("function")
+                .and_then(|f| f.get("description"))
+                .and_then(|d| d.as_str())
+                .unwrap_or("");
+            assert!(
+                desc.starts_with("# "),
+                "every tool must have Markdown description; got: {desc}"
+            );
+        }
+    }
+
+    #[test]
+    fn convert_registry_apcore_with_options_rich_description_uses_real_descriptor() {
+        // The apcore-Registry path can lean on `markdown::render_module_markdown`
+        // because it has the real `ModuleDescriptor` (incl. documentation,
+        // examples, display overlay) — strictly richer than the JSON path.
+        use apcore::context::Context;
+        use apcore::module::{Module, ModuleAnnotations};
+        use apcore::registry::registry::Registry;
+        use apcore::registry::ModuleDescriptor;
+        use async_trait::async_trait;
+        use std::sync::Arc;
+
+        #[derive(Debug)]
+        struct DemoModule;
+
+        #[async_trait]
+        impl Module for DemoModule {
+            fn input_schema(&self) -> Value {
+                json!({"type": "object"})
+            }
+            fn output_schema(&self) -> Value {
+                json!({"type": "object"})
+            }
+            fn description(&self) -> &str {
+                "Resize an image"
+            }
+            async fn execute(
+                &self,
+                _inputs: Value,
+                _ctx: &Context<Value>,
+            ) -> Result<Value, apcore::errors::ModuleError> {
+                Ok(json!({}))
+            }
+        }
+
+        let registry = Arc::new(Registry::default());
+        let descriptor = ModuleDescriptor {
+            module_id: "image.resize".to_string(),
+            name: None,
+            description: "Resize an image".to_string(),
+            documentation: Some("Long-form docs".to_string()),
+            input_schema: json!({"type": "object"}),
+            output_schema: json!({"type": "object"}),
+            version: "1.0.0".to_string(),
+            tags: vec!["image".to_string()],
+            annotations: Some(ModuleAnnotations::default()),
+            examples: vec![],
+            metadata: HashMap::new(),
+            display: None,
+            sunset_date: None,
+            dependencies: vec![],
+            enabled: true,
+        };
+        registry
+            .register("image.resize", Box::new(DemoModule), descriptor)
+            .expect("register");
+
+        let converter = OpenAIConverter::new();
+        let tools = converter
+            .convert_registry_apcore_with_options(
+                &registry,
+                ConvertOptions::default().with_rich_description(true),
+                None,
+                None,
+            )
+            .expect("convert");
+        assert_eq!(tools.len(), 1);
+        let desc = tools[0]
+            .get("function")
+            .and_then(|f| f.get("description"))
+            .and_then(|d| d.as_str())
+            .unwrap_or("");
+        assert!(desc.starts_with("# "), "apcore path must render Markdown");
+        assert!(desc.contains("Resize an image"));
     }
 }

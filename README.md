@@ -50,7 +50,7 @@ cargo add apcore-mcp
 cargo install apcore-mcp
 ```
 
-Requires Rust 1.75+ and `apcore >= 0.19.0`.
+Requires Rust 1.75+ and `apcore >= 0.21.0` + `apcore-toolkit >= 0.6.0`.
 
 ## Quick Start
 
@@ -100,7 +100,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-> **Backend note (v0.14.0):** The Rust SDK's `BackendSource::Executor` is the
+> **Backend note (v0.15.0):** The Rust SDK's `BackendSource::Executor` is the
 > functional path. `BackendSource::ExtensionsDir` (string path) and
 > `BackendSource::Registry` are reserved variants that currently return a
 > `BackendResolution` error from `build()` — wrap your registry in an
@@ -260,7 +260,7 @@ The unified entry point — configure once, use everywhere:
 use apcore_mcp::APCoreMCP;
 
 let mcp = APCoreMCP::builder()
-    .backend(executor)                   // Arc<Executor> (the functional backend in v0.14.0)
+    .backend(executor)                   // Arc<Executor> (the functional backend in v0.15.0)
     .name("apcore-mcp")                  // server name
     .version("1.0.0")                    // defaults to crate version
     .tags(vec!["public".into()])         // filter modules by tags
@@ -498,6 +498,8 @@ let tools = to_openai_tools(executor, OpenAIToolsConfig {
 
 - **Auto-discovery** — all modules in the extensions directory are found and exposed automatically
 - **Display overlay** — `metadata["display"]["mcp"]` controls MCP tool names, descriptions, and guidance per module (§5.13)
+- **Markdown tool descriptions** (`MCPServerFactory::with_rich_description(true)`, v0.15+) — render `Tool.description` as canonical apcore-toolkit Markdown so LLMs get more decision-relevant signal per token; backed by `apcore_toolkit::format_module(ModuleStyle::Markdown)`.
+- **Module preview meta-tool** (`__apcore_module_preview`, v0.15+) — drives `executor.validate()` to predict state changes WITHOUT executing the module (apcore PROTOCOL_SPEC §5.6). Returns `{valid, requires_approval, predicted_changes, checks}` so AI orchestrators can ask "what would change?" before invoking.
 - **Three transports** — stdio (default, for desktop clients), Streamable HTTP, and SSE
 - **JWT authentication** — optional Bearer token auth for HTTP transports with `JWTAuthenticator`, permissive mode, PEM key file support, and env var fallback
 - **Approval mechanism** — runtime approval via MCP elicitation, auto-approve, or always-deny handlers

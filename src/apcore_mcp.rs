@@ -620,12 +620,15 @@ impl APCoreMCP {
             let bridge_weak = Arc::downgrade(bridge);
             transport_manager.set_cancel_handler(Some(Arc::new(move |session_id: &str| {
                 if let Some(b) = bridge_weak.upgrade() {
-                    let n = b.cancel_session_tasks(session_id);
-                    if n > 0 {
-                        tracing::info!(
-                            "Cancelled {n} async task(s) for session {session_id} on client disconnect"
-                        );
-                    }
+                    let session_id = session_id.to_string();
+                    tokio::spawn(async move {
+                        let n = b.cancel_session_tasks(&session_id).await;
+                        if n > 0 {
+                            tracing::info!(
+                                "Cancelled {n} async task(s) for session {session_id} on client disconnect"
+                            );
+                        }
+                    });
                 }
             })));
         }
@@ -642,10 +645,13 @@ impl APCoreMCP {
                 if let Some(b) = bridge_weak.upgrade() {
                     // Cancel any task whose session_key matches, plus also
                     // try treating the key as a direct task_id.
-                    let n = b.cancel_session_tasks(key);
-                    if n == 0 {
-                        b.cancel(key);
-                    }
+                    let key = key.to_string();
+                    tokio::spawn(async move {
+                        let n = b.cancel_session_tasks(&key).await;
+                        if n == 0 {
+                            b.cancel(&key).await;
+                        }
+                    });
                 }
             }));
         }
@@ -776,7 +782,10 @@ impl APCoreMCP {
             let bridge_weak = Arc::downgrade(bridge);
             transport_manager.set_cancel_handler(Some(Arc::new(move |session_id: &str| {
                 if let Some(b) = bridge_weak.upgrade() {
-                    b.cancel_session_tasks(session_id);
+                    let session_id = session_id.to_string();
+                    tokio::spawn(async move {
+                        b.cancel_session_tasks(&session_id).await;
+                    });
                 }
             })));
         }
@@ -2523,9 +2532,10 @@ mod tests {
         let (_, _, tools, _, _, _) = mcp.build_server_components().unwrap();
         let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         let registry_tools = mcp.tools();
-        // Registry tools plus the 4 reserved `__apcore_task_*` meta-tools
-        // auto-appended by the AsyncTaskBridge.
-        assert_eq!(tools.len(), registry_tools.len() + 4);
+        // Registry tools plus the 5 reserved `__apcore_*` meta-tools
+        // auto-appended by the AsyncTaskBridge: 4 task-management tools
+        // plus `__apcore_module_preview` (apcore 0.21 PROTOCOL_SPEC §5.6).
+        assert_eq!(tools.len(), registry_tools.len() + 5);
         for name in &registry_tools {
             assert!(tool_names.contains(&name.as_str()));
         }
@@ -2534,6 +2544,7 @@ mod tests {
             "__apcore_task_status",
             "__apcore_task_cancel",
             "__apcore_task_list",
+            "__apcore_module_preview",
         ] {
             assert!(
                 tool_names.contains(&reserved),
@@ -3093,22 +3104,14 @@ mod tests {
                 &self,
                 _request: &ApprovalRequest,
             ) -> Result<ApprovalResult, ModuleError> {
-                Ok(ApprovalResult {
-                    status: "approved".to_string(),
-                    approved_by: None,
-                    reason: None,
-                    approval_id: None,
-                    metadata: None,
-                })
+                let mut result = ApprovalResult::default();
+                result.status = "approved".to_string();
+                Ok(result)
             }
             async fn check_approval(&self, _id: &str) -> Result<ApprovalResult, ModuleError> {
-                Ok(ApprovalResult {
-                    status: "approved".to_string(),
-                    approved_by: None,
-                    reason: None,
-                    approval_id: None,
-                    metadata: None,
-                })
+                let mut result = ApprovalResult::default();
+                result.status = "approved".to_string();
+                Ok(result)
             }
         }
 
@@ -3141,22 +3144,14 @@ mod tests {
                 &self,
                 _request: &ApprovalRequest,
             ) -> Result<ApprovalResult, ModuleError> {
-                Ok(ApprovalResult {
-                    status: "approved".to_string(),
-                    approved_by: None,
-                    reason: None,
-                    approval_id: None,
-                    metadata: None,
-                })
+                let mut result = ApprovalResult::default();
+                result.status = "approved".to_string();
+                Ok(result)
             }
             async fn check_approval(&self, _id: &str) -> Result<ApprovalResult, ModuleError> {
-                Ok(ApprovalResult {
-                    status: "approved".to_string(),
-                    approved_by: None,
-                    reason: None,
-                    approval_id: None,
-                    metadata: None,
-                })
+                let mut result = ApprovalResult::default();
+                result.status = "approved".to_string();
+                Ok(result)
             }
         }
 
