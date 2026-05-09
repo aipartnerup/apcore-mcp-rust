@@ -304,7 +304,7 @@ use std::sync::Arc;
 // (string path) currently returns a BackendResolution error. Build an
 // Executor first and pass it as the backend.
 let registry: Arc<apcore::Registry> = /* load extensions, e.g. via apcore::load_extensions("./extensions")? */;
-let executor: Arc<apcore::Executor> = Arc::new(apcore::Executor::new(registry));
+let executor: Arc<apcore::Executor> = Arc::new(apcore::Executor::new(registry, apcore::Config::default()));
 
 serve(executor, ServeConfig {
     transport: "streamable-http".into(),
@@ -478,7 +478,7 @@ use std::sync::Arc;
 // Same backend constraint as serve(): pass an Arc<Executor>, not a
 // path string (BackendSource::ExtensionsDir currently errors out).
 let registry: Arc<apcore::Registry> = /* load extensions, e.g. via apcore::load_extensions("./extensions")? */;
-let executor: Arc<apcore::Executor> = Arc::new(apcore::Executor::new(registry));
+let executor: Arc<apcore::Executor> = Arc::new(apcore::Executor::new(registry, apcore::Config::default()));
 
 let tools = to_openai_tools(executor, OpenAIToolsConfig {
     embed_annotations: false,   // append annotation hints to descriptions
