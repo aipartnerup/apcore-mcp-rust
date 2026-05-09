@@ -19,6 +19,24 @@ const INTERNAL_ERROR_CODES: &[ApcoreErrorCode] = &[
 /// Error codes that require detail sanitization (hide sensitive info).
 const SANITIZED_ERROR_CODES: &[ApcoreErrorCode] = &[ApcoreErrorCode::ACLDenied];
 
+/// Error codes that always represent user-fixable conditions — the MCP
+/// envelope must stamp `userFixable=true` even when the upstream
+/// [`ModuleError`] does not set the field. Mirrors Python's
+/// `_USER_FIXABLE_CODES` set and TypeScript's explicit branch stamping.
+/// [A-D-240, A-D-241]
+///
+/// Note: `BindingPolicyViolation` is in the cross-SDK list but apcore 0.21
+/// removed the enum variant, so it cannot appear here. If/when apcore
+/// re-introduces the variant, add it back for parity.
+const USER_FIXABLE_ERROR_CODES: &[ApcoreErrorCode] = &[
+    ApcoreErrorCode::DependencyNotFound,
+    ApcoreErrorCode::DependencyVersionMismatch,
+    ApcoreErrorCode::VersionConstraintInvalid,
+    ApcoreErrorCode::BindingSchemaInferenceFailed,
+    ApcoreErrorCode::BindingSchemaModeConflict,
+    ApcoreErrorCode::BindingStrictSchemaIncompatible,
+];
+
 /// Structured MCP error response.
 ///
 /// Wire format uses camelCase keys to match MCP/TypeScript convention.
@@ -246,7 +264,9 @@ impl ErrorMapper {
             code,
             ApcoreErrorCode::DependencyNotFound | ApcoreErrorCode::DependencyVersionMismatch
         ) {
-            return build_detail_response(error, error_type, error.message.clone());
+            let mut resp = build_detail_response(error, error_type, error.message.clone());
+            stamp_user_fixable(&code, &mut resp);
+            return resp;
         }
 
         // apcore 0.19.0 binding-configuration errors: keep the original message
@@ -260,7 +280,9 @@ impl ErrorMapper {
                 | ApcoreErrorCode::BindingStrictSchemaIncompatible
                 | ApcoreErrorCode::VersionConstraintInvalid
         ) {
-            return build_detail_response(error, error_type, error.message.clone());
+            let mut resp = build_detail_response(error, error_type, error.message.clone());
+            stamp_user_fixable(&code, &mut resp);
+            return resp;
         }
 
         // Async-task capacity: map `TaskLimitExceeded` to a retryable
@@ -343,6 +365,18 @@ fn attach_ai_guidance(error: &ModuleError, resp: &mut McpErrorResponse) {
     }
     if resp.suggestion.is_none() {
         resp.suggestion = error.suggestion.clone();
+    }
+}
+
+/// Stamp `userFixable=true` for codes that are unconditionally user-fixable.
+///
+/// Mirrors Python's `_USER_FIXABLE_CODES` set and TypeScript's explicit
+/// branch stamping. Always overwrites any prior value because the codes in
+/// [`USER_FIXABLE_ERROR_CODES`] are guaranteed user-fixable by spec.
+/// [A-D-240, A-D-241]
+fn stamp_user_fixable(code: &ApcoreErrorCode, resp: &mut McpErrorResponse) {
+    if USER_FIXABLE_ERROR_CODES.contains(code) {
+        resp.user_fixable = Some(true);
     }
 }
 
@@ -756,6 +790,90 @@ mod tests {
         let resp_any = ErrorMapper::to_mcp_error_any(&module_err);
         assert_eq!(resp_typed.error_type, resp_any.error_type);
         assert_eq!(resp_typed.message, resp_any.message);
+    }
+
+    // ---- userFixable stamping for DEPENDENCY_*, VERSION_CONSTRAINT_INVALID,
+    // BINDING_* (cross-SDK parity, A-D-240 + A-D-241) ----
+
+    #[test]
+    fn test_user_fixable_dependency_not_found_stamped_true() {
+        // A-D-240: DEPENDENCY_NOT_FOUND must surface userFixable=true even
+        // when the upstream ModuleError doesn't set it. Matches Python's
+        // `_USER_FIXABLE_CODES` and TS's explicit branch stamping.
+        let err = ModuleError::new(ApcoreErrorCode::DependencyNotFound, "missing dependency");
+        let resp = ErrorMapper::to_mcp_error(&err);
+        assert_eq!(resp.error_type, "DEPENDENCY_NOT_FOUND");
+        assert_eq!(resp.user_fixable, Some(true));
+    }
+
+    #[test]
+    fn test_user_fixable_dependency_version_mismatch_stamped_true() {
+        // A-D-240
+        let err = ModuleError::new(
+            ApcoreErrorCode::DependencyVersionMismatch,
+            "version mismatch",
+        );
+        let resp = ErrorMapper::to_mcp_error(&err);
+        assert_eq!(resp.error_type, "DEPENDENCY_VERSION_MISMATCH");
+        assert_eq!(resp.user_fixable, Some(true));
+    }
+
+    #[test]
+    fn test_user_fixable_version_constraint_invalid_stamped_true() {
+        // A-D-241
+        let err = ModuleError::new(
+            ApcoreErrorCode::VersionConstraintInvalid,
+            "invalid constraint",
+        );
+        let resp = ErrorMapper::to_mcp_error(&err);
+        assert_eq!(resp.error_type, "VERSION_CONSTRAINT_INVALID");
+        assert_eq!(resp.user_fixable, Some(true));
+    }
+
+    #[test]
+    fn test_user_fixable_binding_schema_inference_failed_stamped_true() {
+        // A-D-241
+        let err = ModuleError::new(
+            ApcoreErrorCode::BindingSchemaInferenceFailed,
+            "could not infer schema",
+        );
+        let resp = ErrorMapper::to_mcp_error(&err);
+        assert_eq!(resp.error_type, "BINDING_SCHEMA_INFERENCE_FAILED");
+        assert_eq!(resp.user_fixable, Some(true));
+    }
+
+    #[test]
+    fn test_user_fixable_binding_schema_mode_conflict_stamped_true() {
+        // A-D-241
+        let err = ModuleError::new(
+            ApcoreErrorCode::BindingSchemaModeConflict,
+            "schema mode conflict",
+        );
+        let resp = ErrorMapper::to_mcp_error(&err);
+        assert_eq!(resp.error_type, "BINDING_SCHEMA_MODE_CONFLICT");
+        assert_eq!(resp.user_fixable, Some(true));
+    }
+
+    #[test]
+    fn test_user_fixable_binding_strict_schema_incompatible_stamped_true() {
+        // A-D-241
+        let err = ModuleError::new(
+            ApcoreErrorCode::BindingStrictSchemaIncompatible,
+            "strict schema incompatible",
+        );
+        let resp = ErrorMapper::to_mcp_error(&err);
+        assert_eq!(resp.error_type, "BINDING_STRICT_SCHEMA_INCOMPATIBLE");
+        assert_eq!(resp.user_fixable, Some(true));
+    }
+
+    #[test]
+    fn test_user_fixable_default_remains_none_for_other_codes() {
+        // Codes NOT in USER_FIXABLE_ERROR_CODES must keep userFixable=None
+        // (unless the upstream ModuleError explicitly sets it).
+        let err = ModuleError::new(ApcoreErrorCode::ModuleNotFound, "module not found");
+        let resp = ErrorMapper::to_mcp_error(&err);
+        assert_eq!(resp.error_type, "MODULE_NOT_FOUND");
+        assert!(resp.user_fixable.is_none());
     }
 
     #[test]
