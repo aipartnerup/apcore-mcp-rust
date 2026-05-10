@@ -35,6 +35,7 @@ use apcore::registry::ModuleDescriptor;
 use apcore::{Context, Identity};
 use serde_json::{json, Value};
 
+use crate::server::router::SendNotificationFn;
 use crate::server::types::Tool;
 
 /// Minimal submit result envelope returned by [`AsyncTaskBridge::submit`].
@@ -82,6 +83,20 @@ pub struct AsyncTaskBridge {
     /// Map of task_id → progressToken recorded at submit time for
     /// progress fan-out on terminal transitions.
     progress_tokens: Arc<Mutex<HashMap<String, Value>>>,
+    /// Map of task_id → MCP notification sender, recorded at submit time
+    /// when the caller supplied both a progress token and a notification
+    /// channel. [`AsyncTaskBridge::emit_progress`] fans out
+    /// `notifications/progress` messages to the recorded sender. [A-D-220]
+    ///
+    /// **Per-language idiom note.** Python and TypeScript install a
+    /// `ProgressCallback` directly under `context.data[MCP_PROGRESS_KEY]`
+    /// so module-side `report_progress(context)` looks the callback up.
+    /// Rust's `report_progress(ctx, callback, ...)` takes the callback
+    /// explicitly because `apcore::Context::data` holds JSON `Value`s
+    /// (cannot store closures). The bridge therefore owns the sender map
+    /// itself and exposes [`AsyncTaskBridge::emit_progress`] as the
+    /// fan-out point — module-side ergonomics differ from Py/TS by design.
+    progress_senders: Arc<Mutex<HashMap<String, SendNotificationFn>>>,
     /// Map of session/connection key → set of task ids launched from that
     /// session, so [`AsyncTaskBridge::cancel_session_tasks`] can cancel
     /// them cooperatively when the transport detects disconnect.
@@ -109,6 +124,7 @@ impl AsyncTaskBridge {
             executor,
             output_schemas: HashMap::new(),
             progress_tokens: Arc::new(Mutex::new(HashMap::new())),
+            progress_senders: Arc::new(Mutex::new(HashMap::new())),
             session_tasks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -201,23 +217,44 @@ impl AsyncTaskBridge {
     /// exclusively in the `__apcore_task_submit` meta-tool handler so that
     /// callers can call `submit()` directly without being blocked by the
     /// meta-tool namespace enforcement. [D10-004]
+    ///
+    /// When both `progress_token` AND `send_notification` are provided,
+    /// the sender is stored on the bridge keyed by task_id so subsequent
+    /// calls to [`AsyncTaskBridge::emit_progress`] fan out
+    /// `notifications/progress` messages to the original MCP client.
+    /// Closes cross-language progress-emission gap. [A-D-220]
     pub async fn submit(
         &self,
         module_id: &str,
         inputs: Value,
         identity: Option<Identity>,
         progress_token: Option<Value>,
+        send_notification: Option<SendNotificationFn>,
         session_key: Option<&str>,
     ) -> Result<SubmitResult, apcore::errors::ModuleError> {
         let ctx: Option<Context<Value>> = identity.map(Context::new);
         let task_id = self.manager.submit(module_id, inputs, ctx).await?;
 
-        if let Some(token) = progress_token {
-            let mut guard = self
-                .progress_tokens
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            guard.insert(task_id.clone(), token);
+        // Store progress sink: token + sender pair, mirroring the Python
+        // `_install_progress_sink` and TS inline-closure patterns. [A-D-220]
+        // We require BOTH token and sender to install — a token without a
+        // sender has nowhere to fan out to, and a sender without a token
+        // has no way to identify the request to the MCP client.
+        if let (Some(token), Some(sender)) = (progress_token, send_notification) {
+            {
+                let mut guard = self
+                    .progress_tokens
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                guard.insert(task_id.clone(), token);
+            }
+            {
+                let mut guard = self
+                    .progress_senders
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                guard.insert(task_id.clone(), sender);
+            }
         }
 
         if let Some(session) = session_key {
@@ -232,6 +269,71 @@ impl AsyncTaskBridge {
             task_id,
             status: "pending".to_string(),
         })
+    }
+
+    /// Emit a `notifications/progress` message for the given task.
+    ///
+    /// Looks up the task's stored progress token and notification sender
+    /// (recorded by [`AsyncTaskBridge::submit`] when both were supplied)
+    /// and fans out a notification to the MCP client. No-op if the task
+    /// has no recorded sink. [A-D-220]
+    ///
+    /// The notification shape matches Python+TS:
+    /// ```json
+    /// {
+    ///   "method": "notifications/progress",
+    ///   "params": {
+    ///     "progressToken": <token>,
+    ///     "progress": <f64>,
+    ///     "total": <f64 | null>,
+    ///     "message": <string?>  // omitted when None
+    ///   }
+    /// }
+    /// ```
+    pub async fn emit_progress(
+        &self,
+        task_id: &str,
+        progress: f64,
+        total: Option<f64>,
+        message: Option<&str>,
+    ) {
+        let (token, sender) = {
+            let token_guard = self
+                .progress_tokens
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let sender_guard = self
+                .progress_senders
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let token = match token_guard.get(task_id) {
+                Some(t) => t.clone(),
+                None => return,
+            };
+            let sender = match sender_guard.get(task_id) {
+                Some(s) => Arc::clone(s),
+                None => return,
+            };
+            (token, sender)
+        };
+
+        let mut params = serde_json::Map::new();
+        params.insert("progressToken".to_string(), token);
+        params.insert("progress".to_string(), json!(progress));
+        params.insert(
+            "total".to_string(),
+            total.map(|t| json!(t)).unwrap_or(Value::Null),
+        );
+        if let Some(msg) = message {
+            params.insert("message".to_string(), Value::String(msg.to_string()));
+        }
+        let notification = json!({
+            "method": "notifications/progress",
+            "params": Value::Object(params),
+        });
+        if let Err(e) = sender(notification).await {
+            tracing::debug!(task_id = %task_id, "failed to send progress notification: {e}");
+        }
     }
 
     /// Retrieve the current `TaskInfo` for a task id.
@@ -275,6 +377,13 @@ impl AsyncTaskBridge {
         {
             let mut guard = self
                 .progress_tokens
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            guard.remove(task_id);
+        }
+        {
+            let mut guard = self
+                .progress_senders
                 .lock()
                 .unwrap_or_else(|p| p.into_inner());
             guard.remove(task_id);
@@ -418,12 +527,19 @@ impl AsyncTaskBridge {
         arguments: &Value,
         identity: Option<Identity>,
         progress_token: Option<Value>,
+        send_notification: Option<SendNotificationFn>,
         session_key: Option<&str>,
     ) -> Option<Result<Value, apcore::errors::ModuleError>> {
         match tool_name {
             META_TOOL_SUBMIT => Some(
-                self.handle_submit(arguments, identity, progress_token, session_key)
-                    .await,
+                self.handle_submit(
+                    arguments,
+                    identity,
+                    progress_token,
+                    send_notification,
+                    session_key,
+                )
+                .await,
             ),
             META_TOOL_STATUS => Some(self.handle_status(arguments)),
             META_TOOL_CANCEL => Some(self.handle_cancel(arguments).await),
@@ -438,6 +554,7 @@ impl AsyncTaskBridge {
         arguments: &Value,
         identity: Option<Identity>,
         progress_token: Option<Value>,
+        send_notification: Option<SendNotificationFn>,
         session_key: Option<&str>,
     ) -> Result<Value, apcore::errors::ModuleError> {
         let module_id = arguments
@@ -480,7 +597,14 @@ impl AsyncTaskBridge {
         // submit() now returns SubmitResult{task_id, status} — the exact
         // envelope shape Python+TS return. [D10-003]
         let result = self
-            .submit(module_id, inputs, identity, progress_token, session_key)
+            .submit(
+                module_id,
+                inputs,
+                identity,
+                progress_token,
+                send_notification,
+                session_key,
+            )
             .await?;
         Ok(json!({
             "task_id": result.task_id,
@@ -756,7 +880,7 @@ mod tests {
         // must SUCCEED (no GeneralInvalidInput from submit itself).
         let bridge = AsyncTaskBridge::new(make_executor());
         let result = bridge
-            .submit("__apcore_task_submit", json!({}), None, None, None)
+            .submit("__apcore_task_submit", json!({}), None, None, None, None)
             .await;
         // The manager will reject it internally (unknown module), but that's
         // a different error path — NOT a GeneralInvalidInput from the bridge.
@@ -775,7 +899,7 @@ mod tests {
         // not the full TaskInfo.
         let bridge = AsyncTaskBridge::new(make_executor());
         let result = bridge
-            .submit("some.module", json!({}), None, None, None)
+            .submit("some.module", json!({}), None, None, None, None)
             .await
             .expect("submit should succeed");
         assert!(!result.task_id.is_empty(), "task_id must be non-empty");
@@ -789,6 +913,7 @@ mod tests {
             .handle_meta_tool(
                 META_TOOL_SUBMIT,
                 &json!({"module_id": "some.module", "arguments": {}}),
+                None,
                 None,
                 None,
                 None,
@@ -826,6 +951,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .expect("meta-tool must be routed")
@@ -856,6 +982,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await;
 
@@ -875,7 +1002,7 @@ mod tests {
         let executor = make_executor();
         let bridge = AsyncTaskBridge::with_limits(executor, 0, 100); // 0 concurrency keeps tasks pending
         let submit = bridge
-            .submit("m", json!({}), None, None, None)
+            .submit("m", json!({}), None, None, None, None)
             .await
             .expect("submit");
         let task_id = submit.task_id;
@@ -883,6 +1010,7 @@ mod tests {
             .handle_meta_tool(
                 META_TOOL_CANCEL,
                 &json!({"task_id": task_id}),
+                None,
                 None,
                 None,
                 None,
@@ -897,13 +1025,14 @@ mod tests {
     async fn handle_meta_tool_list_filters_by_status() {
         let bridge = AsyncTaskBridge::with_limits(make_executor(), 0, 100);
         let _ = bridge
-            .submit("m", json!({}), None, None, None)
+            .submit("m", json!({}), None, None, None, None)
             .await
             .unwrap();
         let res = bridge
             .handle_meta_tool(
                 META_TOOL_LIST,
                 &json!({"status": "pending"}),
+                None,
                 None,
                 None,
                 None,
@@ -922,16 +1051,16 @@ mod tests {
     async fn cancel_session_tasks_cancels_tracked_ids() {
         let bridge = AsyncTaskBridge::with_limits(make_executor(), 0, 100);
         let t1 = bridge
-            .submit("m1", json!({}), None, None, Some("sess-a"))
+            .submit("m1", json!({}), None, None, None, Some("sess-a"))
             .await
             .unwrap();
         let t2 = bridge
-            .submit("m2", json!({}), None, None, Some("sess-a"))
+            .submit("m2", json!({}), None, None, None, Some("sess-a"))
             .await
             .unwrap();
         // Task from another session should not be affected.
         let t3 = bridge
-            .submit("m3", json!({}), None, None, Some("sess-b"))
+            .submit("m3", json!({}), None, None, None, Some("sess-b"))
             .await
             .unwrap();
 
@@ -955,7 +1084,7 @@ mod tests {
     async fn handle_meta_tool_unknown_returns_none() {
         let bridge = AsyncTaskBridge::new(make_executor());
         let res = bridge
-            .handle_meta_tool("math.add", &json!({}), None, None, None)
+            .handle_meta_tool("math.add", &json!({}), None, None, None, None)
             .await;
         assert!(res.is_none());
     }
@@ -970,6 +1099,7 @@ mod tests {
             .handle_meta_tool(
                 META_TOOL_SUBMIT,
                 &json!({"module_id": "__apcore_task_submit", "arguments": {}}),
+                None,
                 None,
                 None,
                 None,
@@ -1107,6 +1237,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .expect("meta-tool must be routed")
@@ -1146,6 +1277,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .expect("meta-tool routed")
@@ -1162,6 +1294,7 @@ mod tests {
             .handle_meta_tool(
                 META_TOOL_PREVIEW,
                 &json!({"module_id": "demo.preview"}),
+                None,
                 None,
                 None,
                 None,
@@ -1183,6 +1316,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .expect("meta-tool routed");
@@ -1197,6 +1331,7 @@ mod tests {
             .handle_meta_tool(
                 META_TOOL_PREVIEW,
                 &json!({"arguments": {}}),
+                None,
                 None,
                 None,
                 None,
@@ -1221,6 +1356,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await;
         let inner = result.expect("meta-tool must be routed");
@@ -1234,6 +1370,153 @@ mod tests {
             val.get("task_id").and_then(|v| v.as_str()),
             Some("nonexistent-task-id"),
             "task_id must be echoed in the error envelope"
+        );
+    }
+
+    // -- [A-D-220] Progress sink fan-out -------------------------------------
+
+    /// Build a SendNotificationFn that captures every notification into a
+    /// shared Vec for assertion. Mirrors the test helper used by router.rs.
+    fn make_capturing_sender() -> (
+        crate::server::router::SendNotificationFn,
+        std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+    ) {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let sink = std::sync::Arc::clone(&captured);
+        let sender: crate::server::router::SendNotificationFn =
+            std::sync::Arc::new(move |val: Value| {
+                let sink = std::sync::Arc::clone(&sink);
+                Box::pin(async move {
+                    sink.lock().unwrap().push(val);
+                    Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+                })
+            });
+        (sender, captured)
+    }
+
+    #[tokio::test]
+    async fn submit_with_send_notification_records_progress_sink() {
+        // [A-D-220] When submit() receives both progress_token and
+        // send_notification, the bridge must store the sender so that
+        // emit_progress(task_id, ...) can fan out a notifications/progress
+        // message to the original MCP client. Pre-fix Rust ignored
+        // send_notification entirely (the parameter did not exist).
+        let bridge = AsyncTaskBridge::new(make_executor());
+        let (sender, captured) = make_capturing_sender();
+
+        let result = bridge
+            .submit(
+                "demo.module",
+                json!({"k": "v"}),
+                None,
+                Some(json!("token-42")),
+                Some(sender),
+                None,
+            )
+            .await
+            .expect("submit should succeed");
+
+        // Now fan out a progress notification for this task.
+        bridge
+            .emit_progress(&result.task_id, 0.5, Some(1.0), Some("halfway"))
+            .await;
+
+        let notifications = captured.lock().unwrap();
+        assert_eq!(
+            notifications.len(),
+            1,
+            "exactly one notification must have been emitted; got {notifications:?}"
+        );
+        let notif = &notifications[0];
+        assert_eq!(
+            notif.get("method").and_then(|v| v.as_str()),
+            Some("notifications/progress"),
+            "method must be notifications/progress; got {notif:?}"
+        );
+        let params = notif
+            .get("params")
+            .and_then(|v| v.as_object())
+            .expect("params must be an object");
+        assert_eq!(
+            params.get("progressToken").and_then(|v| v.as_str()),
+            Some("token-42"),
+            "progressToken must echo the submitted token"
+        );
+        assert_eq!(
+            params.get("progress").and_then(|v| v.as_f64()),
+            Some(0.5),
+            "progress value must be passed through"
+        );
+        assert_eq!(
+            params.get("total").and_then(|v| v.as_f64()),
+            Some(1.0),
+            "total value must be passed through"
+        );
+        assert_eq!(
+            params.get("message").and_then(|v| v.as_str()),
+            Some("halfway"),
+            "message must be present when supplied"
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_progress_no_op_when_no_sender_recorded() {
+        // submit() without send_notification must NOT install a sink, and
+        // emit_progress must be a silent no-op rather than panicking.
+        let bridge = AsyncTaskBridge::new(make_executor());
+        let result = bridge
+            .submit(
+                "demo.module",
+                json!({}),
+                None,
+                Some(json!("token-x")),
+                None, // no sender
+                None,
+            )
+            .await
+            .expect("submit ok");
+
+        // Should not panic; verifies the lookup-then-return-early branch.
+        bridge.emit_progress(&result.task_id, 1.0, None, None).await;
+    }
+
+    #[tokio::test]
+    async fn emit_progress_no_op_for_unknown_task_id() {
+        let bridge = AsyncTaskBridge::new(make_executor());
+        bridge
+            .emit_progress("nonexistent-task", 0.5, Some(1.0), Some("noop"))
+            .await;
+        // success = no panic
+    }
+
+    #[tokio::test]
+    async fn cancel_clears_progress_sender_to_avoid_leak() {
+        // After cancel(), emit_progress must become a no-op for the
+        // cancelled task — verifies progress_senders is cleaned up.
+        let bridge = AsyncTaskBridge::with_limits(make_executor(), 0, 100);
+        let (sender, captured) = make_capturing_sender();
+        let result = bridge
+            .submit(
+                "m",
+                json!({}),
+                None,
+                Some(json!("token-c")),
+                Some(sender),
+                None,
+            )
+            .await
+            .expect("submit ok");
+
+        let _cancelled = bridge.cancel(&result.task_id).await;
+
+        bridge
+            .emit_progress(&result.task_id, 0.9, Some(1.0), Some("after-cancel"))
+            .await;
+
+        let notifs = captured.lock().unwrap();
+        assert!(
+            notifs.is_empty(),
+            "no notification should be emitted after cancel; got {notifs:?}"
         );
     }
 }

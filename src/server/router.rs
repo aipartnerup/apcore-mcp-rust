@@ -821,12 +821,19 @@ impl ExecutionRouter {
                 .identity
                 .as_ref()
                 .and_then(|v| serde_json::from_value::<apcore::Identity>(v.clone()).ok());
+            // [A-D-220] Pass send_notification through so the bridge can
+            // store it in its progress_senders map and fan out
+            // `notifications/progress` via emit_progress(). Cloning the
+            // Arc is cheap; the original sender remains available for the
+            // non-bridge code paths below.
+            let bridge_sender = call_extra.send_notification.as_ref().map(Arc::clone);
             if let Some(result) = bridge
                 .handle_meta_tool(
                     tool_name,
                     arguments,
                     resolved_identity.clone(),
                     progress_token_val.clone(),
+                    bridge_sender.clone(),
                     session_key.as_deref(),
                 )
                 .await
@@ -845,6 +852,7 @@ impl ExecutionRouter {
                         arguments.clone(),
                         resolved_identity,
                         progress_token_val,
+                        bridge_sender,
                         session_key.as_deref(),
                     )
                     .await;
