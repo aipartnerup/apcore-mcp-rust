@@ -67,7 +67,7 @@ impl ErrorMapper {
     ///
     /// Attempts to downcast to [`ModuleError`] and delegates to the typed
     /// [`Self::to_mcp_error`] fast path. Unknown error types are mapped to an
-    /// `INTERNAL_ERROR` envelope, matching Python+TS fallback behavior. [D10-009]
+    /// `GENERAL_INTERNAL_ERROR` envelope, matching Python+TS fallback behavior (EM-6).
     ///
     /// Note: downcast requires `'static` — the bound is placed on this signature.
     pub fn to_mcp_error_any(err: &(dyn std::error::Error + 'static)) -> McpErrorResponse {
@@ -75,17 +75,10 @@ impl ErrorMapper {
         if let Some(module_err) = err.downcast_ref::<ModuleError>() {
             return Self::to_mcp_error(module_err);
         }
-        // Unknown error type → INTERNAL_ERROR, no details (avoid leaking impl)
-        McpErrorResponse {
-            is_error: true,
-            error_type: "INTERNAL_ERROR".to_string(),
-            message: "Internal error occurred".to_string(),
-            details: None,
-            retryable: None,
-            ai_guidance: None,
-            user_fixable: None,
-            suggestion: None,
-        }
+        // Unknown error type → canonical GENERAL_INTERNAL_ERROR (EM-6).
+        // [D10-002] Wire string is the literal "GENERAL_INTERNAL_ERROR" so MCP
+        // clients can branch on errorType === "GENERAL_INTERNAL_ERROR" portably.
+        internal_error_response()
     }
 
     /// Convert an apcore [`ModuleError`] into an [`McpErrorResponse`].
@@ -469,6 +462,24 @@ pub fn register_mcp_formatter() {
     }
 }
 
+/// Canonical `GENERAL_INTERNAL_ERROR` envelope for non-`ModuleError` fallback (EM-6).
+///
+/// All three SDKs (Python, TypeScript, Rust) emit byte-identical envelopes so MCP
+/// clients can branch on `errorType === "GENERAL_INTERNAL_ERROR"` portably. See
+/// `apcore-mcp/docs/features/error-mapper.md` (EM-6).
+pub fn internal_error_response() -> McpErrorResponse {
+    McpErrorResponse {
+        is_error: true,
+        error_type: "GENERAL_INTERNAL_ERROR".to_string(),
+        message: "Internal error occurred".to_string(),
+        details: None,
+        retryable: None,
+        ai_guidance: None,
+        user_fixable: None,
+        suggestion: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -772,14 +783,44 @@ mod tests {
     // ---- to_mcp_error_any ----
 
     #[test]
-    fn test_to_mcp_error_any_with_io_error_returns_internal_error() {
-        // [D10-009] Arbitrary errors (not ModuleError) must fall back to INTERNAL_ERROR.
+    fn test_to_mcp_error_any_with_io_error_returns_general_internal_error() {
+        // [D10-002 / EM-6] Arbitrary errors (not ModuleError) must fall back to
+        // GENERAL_INTERNAL_ERROR (not INTERNAL_ERROR) so MCP clients can branch on
+        // errorType === "GENERAL_INTERNAL_ERROR" portably across all three SDKs.
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
         let resp = ErrorMapper::to_mcp_error_any(&io_err);
         assert!(resp.is_error);
-        assert_eq!(resp.error_type, "INTERNAL_ERROR");
+        assert_eq!(resp.error_type, "GENERAL_INTERNAL_ERROR");
         assert_eq!(resp.message, "Internal error occurred");
         assert!(resp.details.is_none());
+    }
+
+    #[test]
+    fn test_internal_error_response_helper_envelope() {
+        // [D10-001 / EM-6] internal_error_response() returns the canonical envelope.
+        let envelope = internal_error_response();
+        assert!(envelope.is_error);
+        assert_eq!(envelope.error_type, "GENERAL_INTERNAL_ERROR");
+        assert_eq!(envelope.message, "Internal error occurred");
+        assert!(envelope.details.is_none());
+        assert!(envelope.retryable.is_none());
+        assert!(envelope.ai_guidance.is_none());
+        assert!(envelope.user_fixable.is_none());
+        assert!(envelope.suggestion.is_none());
+    }
+
+    #[test]
+    fn test_to_mcp_error_any_ignores_input_contents() {
+        // [D10-002 / EM-6] The helper deliberately ignores the error's class and message
+        // (security: avoid leaking server-side state to MCP clients).
+        let secret_err = std::io::Error::other("secret-detail-XYZ");
+        let resp = ErrorMapper::to_mcp_error_any(&secret_err);
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(
+            !json.contains("secret-detail-XYZ"),
+            "to_mcp_error_any leaked input message: {json}"
+        );
+        assert_eq!(resp.error_type, "GENERAL_INTERNAL_ERROR");
     }
 
     #[test]

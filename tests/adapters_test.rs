@@ -61,12 +61,13 @@ fn error_mapper_internal_errors_sanitized() {
 }
 
 #[test]
-fn error_mapper_any_with_io_error_returns_internal_error() {
-    // [D10-009] Arbitrary error types fall back to INTERNAL_ERROR.
+fn error_mapper_any_with_io_error_returns_general_internal_error() {
+    // [D10-002 / EM-6] Arbitrary error types fall back to GENERAL_INTERNAL_ERROR
+    // (canonical envelope) so MCP clients can branch on errorType portably.
     let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
     let resp = ErrorMapper::to_mcp_error_any(&io_err);
     assert!(resp.is_error);
-    assert_eq!(resp.error_type, "INTERNAL_ERROR");
+    assert_eq!(resp.error_type, "GENERAL_INTERNAL_ERROR");
 }
 
 // ---- SchemaConverter integration tests -------------------------------------

@@ -647,6 +647,17 @@ impl AsyncTaskBridge {
                     "__apcore_task_cancel requires 'task_id'",
                 )
             })?;
+        // [D10-004] Pre-check task existence (matching Python `_handle_cancel_tool`).
+        // Without this, unknown task_ids silently return `{cancelled: false}` —
+        // callers can't distinguish "task existed and is uncancellable" from
+        // "task never existed". Mirrors handle_status's existence-check path.
+        if self.get_status(task_id).is_none() {
+            return Ok(json!({
+                "error": "ASYNC_TASK_NOT_FOUND",
+                "task_id": task_id,
+                "is_error": true,
+            }));
+        }
         let cancelled = self.cancel(task_id).await;
         Ok(json!({ "task_id": task_id, "cancelled": cancelled }))
     }
@@ -1370,6 +1381,44 @@ mod tests {
             val.get("task_id").and_then(|v| v.as_str()),
             Some("nonexistent-task-id"),
             "task_id must be echoed in the error envelope"
+        );
+    }
+
+    // -- [D10-004] handle_cancel pre-checks task existence --------------------
+
+    #[tokio::test]
+    async fn handle_cancel_unknown_task_returns_not_found_envelope() {
+        // [D10-004] Python `_handle_cancel_tool` checks `_manager.get_status(task_id) is None`
+        // first and returns the ASYNC_TASK_NOT_FOUND envelope. Pre-fix Rust skipped the
+        // existence check and silently returned `{cancelled: false}` for unknown ids —
+        // callers couldn't distinguish "task existed but uncancellable" from "never existed".
+        let bridge = AsyncTaskBridge::new(make_executor());
+        let result = bridge
+            .handle_meta_tool(
+                META_TOOL_CANCEL,
+                &json!({"task_id": "ghost-task"}),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        let inner = result.expect("meta-tool must be routed");
+        let val = inner.expect("handle_cancel must return Ok envelope, not Err, for unknown task");
+        assert_eq!(
+            val.get("error").and_then(|v| v.as_str()),
+            Some("ASYNC_TASK_NOT_FOUND"),
+            "error field must be ASYNC_TASK_NOT_FOUND; got: {val:?}"
+        );
+        assert_eq!(
+            val.get("task_id").and_then(|v| v.as_str()),
+            Some("ghost-task"),
+            "task_id must be echoed in the error envelope"
+        );
+        // Must NOT silently report cancelled=false for unknown task
+        assert!(
+            val.get("cancelled").is_none(),
+            "unknown-task envelope must not carry cancelled field; got: {val:?}"
         );
     }
 

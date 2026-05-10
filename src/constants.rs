@@ -38,6 +38,7 @@ pub enum ErrorCode {
     CircularCall,
     CallFrequencyExceeded,
     InternalError,
+    GeneralInternalError,
     ModuleTimeout,
     ModuleLoadError,
     ModuleExecuteError,
@@ -166,7 +167,7 @@ mod tests {
     fn error_code_count() {
         // Intentional guard: update this count when adding new error codes
         // to ensure the strum EnumIter derivation stays in sync.
-        assert_eq!(ErrorCode::iter().count(), 36);
+        assert_eq!(ErrorCode::iter().count(), 37);
     }
 
     #[test]
@@ -271,6 +272,7 @@ mod tests {
             "CIRCULAR_CALL",
             "CALL_FREQUENCY_EXCEEDED",
             "INTERNAL_ERROR",
+            "GENERAL_INTERNAL_ERROR",
             "MODULE_TIMEOUT",
             "MODULE_LOAD_ERROR",
             "MODULE_EXECUTE_ERROR",

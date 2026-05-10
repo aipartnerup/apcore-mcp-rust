@@ -135,7 +135,7 @@ pub fn get_scalar_config() -> McpScalarConfig {
 }
 
 /// Returns the default configuration values for the MCP namespace.
-pub fn mcp_defaults() -> serde_json::Value {
+pub(crate) fn mcp_defaults() -> serde_json::Value {
     serde_json::json!({
         "transport": "stdio",
         "host": "127.0.0.1",

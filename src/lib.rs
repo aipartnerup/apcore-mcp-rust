@@ -53,6 +53,7 @@ pub use crate::server::server::{MCPServer, MCPServerConfig, RegistryOrExecutor, 
 pub use crate::server::transport::TransportManager;
 
 // ---- Re-exports: adapters ---------------------------------------------------
+pub use crate::adapters::internal_error_response;
 pub use crate::adapters::register_mcp_formatter;
 pub use crate::adapters::AdapterError;
 pub use crate::adapters::AnnotationMapper;
@@ -63,7 +64,7 @@ pub use crate::adapters::ModuleIDNormalizer;
 pub use crate::adapters::SchemaConverter;
 
 // ---- Re-exports: config bus -------------------------------------------------
-pub use crate::config::{mcp_defaults, register_mcp_namespace, MCP_ENV_PREFIX, MCP_NAMESPACE};
+pub use crate::config::{register_mcp_namespace, MCP_ENV_PREFIX, MCP_NAMESPACE};
 
 // ---- Re-exports: converters -------------------------------------------------
 pub use crate::converters::openai::{
@@ -77,4 +78,7 @@ pub use crate::helpers::{elicit, report_progress, ElicitResult, MCP_ELICIT_KEY, 
 // Match top-level surface of apcore-mcp-python (REGISTRY_EVENTS, ERROR_CODES,
 // MODULE_ID_PATTERN) and apcore-mcp-typescript (REGISTRY_EVENTS, ErrorCodes,
 // MODULE_ID_PATTERN, APCORE_EVENTS).
+//
+// `apcore_events`: re-exported for cross-SDK parity with Python `apcore_mcp.APCORE_EVENTS`
+// and TypeScript `APCORE_EVENTS`. Has no internal callers in this crate; do not delete.
 pub use crate::constants::{apcore_events, ErrorCode, RegistryEvent, MODULE_ID_PATTERN};
