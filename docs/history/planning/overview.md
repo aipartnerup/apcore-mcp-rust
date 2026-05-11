@@ -1,5 +1,9 @@
 # apcore-mcp-rust — Implementation Overview
 
+> **Archived 2026-05-11 — these planning documents predate the v0.15.0
+> implementation and have been preserved for historical reference. Current
+> canonical truth is `src/` and `docs/features/`.** [D9-006]
+
 ## Overall Progress
 
 ```
