@@ -2,6 +2,9 @@
 //!
 //! Handles argument validation, execution dispatch, and output formatting.
 
+// TODO(D11-110): Audit all fallible call sites (?, unwrap, expect, .await?) to ensure every
+// error path funnels through ErrorMapper before propagation. See audit-report D11-110.
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
