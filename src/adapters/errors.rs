@@ -286,6 +286,13 @@ impl ErrorMapper {
             if resp.retryable.is_none() {
                 resp.retryable = Some(true);
             }
+            // [D11-106] This SDK-side `ai_guidance` fallback is intentional:
+            // it gives the agent an actionable hint when the underlying
+            // `ModuleError` did not populate one. Python and TypeScript
+            // currently rely on the upstream apcore error to carry the
+            // guidance and have no equivalent fallback. The cross-language
+            // alignment is tracked as a follow-up PR; do not remove this
+            // block without coordinating across all three SDKs.
             if resp.ai_guidance.is_none() {
                 resp.ai_guidance = Some(
                     "AsyncTaskManager has reached its max_tasks cap. \
