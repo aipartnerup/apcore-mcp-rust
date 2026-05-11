@@ -5,6 +5,7 @@
 pub mod annotations;
 pub mod approval;
 pub mod errors;
+pub mod formatter;
 pub mod id_normalizer;
 pub mod schema;
 
