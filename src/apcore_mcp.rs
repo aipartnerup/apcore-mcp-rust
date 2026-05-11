@@ -1460,19 +1460,8 @@ pub struct ServeConfig {
     pub require_auth: Option<bool>,
     /// HTTP paths that bypass authentication.
     pub exempt_paths: Option<Vec<String>>,
-    /// Approval handler for destructive operations.
-    /// TODO: use `Option<Box<dyn ApprovalHandler>>` when trait is object-safe.
-    pub approval_handler: Option<serde_json::Value>,
-    /// Output formatter override.
-    /// TODO: use `Option<Box<dyn OutputFormatter>>` once the trait is defined.
-    pub output_formatter: Option<serde_json::Value>,
     /// Whether to redact sensitive fields from output.
     pub redact_output: Option<bool>,
-    /// Extra middleware layers.
-    /// TODO: type as `Option<Vec<Box<dyn tower::Layer<...>>>>` when tower Layer is object-safe.
-    pub middleware: Option<serde_json::Value>,
-    /// ACL configuration JSON.
-    pub acl: Option<serde_json::Value>,
     /// Observability configuration.
     pub observability: Option<serde_json::Value>,
     /// Enable async task bridge.
@@ -1510,11 +1499,7 @@ impl Default for ServeConfig {
             authenticator: None,
             require_auth: None,
             exempt_paths: None,
-            approval_handler: None,
-            output_formatter: None,
             redact_output: None,
-            middleware: None,
-            acl: None,
             observability: None,
             async_tasks: None,
             async_max_concurrent: None,
@@ -1554,14 +1539,8 @@ pub struct AsyncServeConfig {
     pub require_auth: Option<bool>,
     /// HTTP paths that bypass authentication.
     pub exempt_paths: Option<Vec<String>>,
-    /// Approval handler for destructive operations.
-    pub approval_handler: Option<serde_json::Value>,
-    /// Output formatter override.
-    pub output_formatter: Option<serde_json::Value>,
     /// Whether to redact sensitive fields from output.
     pub redact_output: Option<bool>,
-    /// ACL configuration JSON.
-    pub acl: Option<serde_json::Value>,
     /// Observability configuration.
     pub observability: Option<serde_json::Value>,
     /// Enable async task bridge.
@@ -1580,8 +1559,6 @@ pub struct AsyncServeConfig {
     pub on_shutdown: Option<serde_json::Value>,
     /// Metrics collector override.
     pub metrics_collector: Option<serde_json::Value>,
-    /// Extra middleware layers.
-    pub middleware: Option<serde_json::Value>,
 }
 
 impl Default for AsyncServeConfig {
@@ -1597,10 +1574,7 @@ impl Default for AsyncServeConfig {
             authenticator: None,
             require_auth: None,
             exempt_paths: None,
-            approval_handler: None,
-            output_formatter: None,
             redact_output: None,
-            acl: None,
             observability: None,
             async_tasks: None,
             async_max_concurrent: None,
@@ -1610,7 +1584,6 @@ impl Default for AsyncServeConfig {
             on_startup: None,
             on_shutdown: None,
             metrics_collector: None,
-            middleware: None,
         }
     }
 }
@@ -1705,32 +1678,6 @@ pub fn serve(backend: impl Into<BackendSource>, config: ServeConfig) -> Result<(
     if let Some(redact) = config.redact_output {
         builder = builder.redact_output(redact);
     }
-    // Fields that cannot yet be forwarded emit a runtime warning so callers
-    // are not silently surprised.
-    if config.approval_handler.is_some() {
-        tracing::warn!(
-            "ServeConfig.approval_handler is not yet wired into the execution pipeline \
-            — this setting has no effect"
-        );
-    }
-    if config.output_formatter.is_some() {
-        tracing::warn!(
-            "ServeConfig.output_formatter is not yet wired into the execution pipeline \
-            — this setting has no effect"
-        );
-    }
-    if config.middleware.is_some() {
-        tracing::warn!(
-            "ServeConfig.middleware (serde_json::Value placeholder) is not yet wired \
-            — use APCoreMCPBuilder::middleware() directly"
-        );
-    }
-    if config.acl.is_some() {
-        tracing::warn!(
-            "ServeConfig.acl (serde_json::Value placeholder) is not yet wired \
-            — use APCoreMCPBuilder::acl() directly"
-        );
-    }
     // observability — extract bool from `true`/`false` or `{ "enabled": bool }`
     // shapes and forward to APCoreMCPBuilder::observability(bool). Matches
     // apcore-mcp-python serve(observability: bool) parity. [D1-001]
@@ -1805,31 +1752,6 @@ pub async fn async_serve(
     }
     if let Some(redact) = config.redact_output {
         builder = builder.redact_output(redact);
-    }
-    // Fields that cannot yet be forwarded emit a runtime warning.
-    if config.approval_handler.is_some() {
-        tracing::warn!(
-            "AsyncServeConfig.approval_handler is not yet wired into the execution pipeline \
-            — this setting has no effect"
-        );
-    }
-    if config.output_formatter.is_some() {
-        tracing::warn!(
-            "AsyncServeConfig.output_formatter is not yet wired into the execution pipeline \
-            — this setting has no effect"
-        );
-    }
-    if config.middleware.is_some() {
-        tracing::warn!(
-            "AsyncServeConfig.middleware (serde_json::Value placeholder) is not yet wired \
-            — use APCoreMCPBuilder::middleware() directly"
-        );
-    }
-    if config.acl.is_some() {
-        tracing::warn!(
-            "AsyncServeConfig.acl (serde_json::Value placeholder) is not yet wired \
-            — use APCoreMCPBuilder::acl() directly"
-        );
     }
     // observability — extract bool and forward; matches Python parity. [D1-002]
     if let Some(obs) = config.observability.as_ref() {
@@ -2831,7 +2753,6 @@ mod tests {
         assert!(cfg.authenticator.is_none());
         assert!(cfg.require_auth.is_none());
         assert!(cfg.exempt_paths.is_none());
-        assert!(cfg.approval_handler.is_none());
         assert!(cfg.redact_output.is_none());
         assert!(cfg.async_tasks.is_none());
         assert!(cfg.on_startup.is_none());
