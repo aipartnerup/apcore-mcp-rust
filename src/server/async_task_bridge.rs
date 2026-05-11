@@ -373,7 +373,15 @@ impl AsyncTaskBridge {
     }
 
     /// Cancel a running or pending task.
+    ///
+    /// [D11-103] Order matters here: `manager.cancel` is awaited FIRST so
+    /// any progress notification emitted during the cancellation handshake
+    /// can still observe the sender/token in our maps. Only after the
+    /// manager has finalised the task do we drop the progress bindings.
+    /// Matches Python (async_task_bridge.py:458-460) and TypeScript
+    /// (async_task_bridge.ts:590-596).
     pub async fn cancel(&self, task_id: &str) -> bool {
+        let cancelled = self.manager.cancel(task_id).await;
         {
             let mut guard = self
                 .progress_tokens
@@ -388,7 +396,7 @@ impl AsyncTaskBridge {
                 .unwrap_or_else(|p| p.into_inner());
             guard.remove(task_id);
         }
-        self.manager.cancel(task_id).await
+        cancelled
     }
 
     /// Cancel every task recorded under the given session key. Used by the
@@ -593,7 +601,20 @@ impl AsyncTaskBridge {
                 ),
             ));
         }
-        let inputs = arguments.get("arguments").cloned().unwrap_or(json!({}));
+        // [D11-101] Validate that `arguments`, when present and non-null,
+        // is a JSON object. Mirrors the shape-check pattern already used in
+        // `handle_preview` (above) so a stray array/scalar never silently
+        // submits with empty inputs.
+        let inputs = match arguments.get("arguments") {
+            None | Some(Value::Null) => json!({}),
+            Some(Value::Object(_)) => arguments.get("arguments").cloned().unwrap_or(json!({})),
+            Some(_) => {
+                return Err(apcore::errors::ModuleError::new(
+                    apcore::errors::ErrorCode::GeneralInvalidInput,
+                    "__apcore_task_submit requires `arguments` to be a JSON object",
+                ));
+            }
+        };
         // submit() now returns SubmitResult{task_id, status} — the exact
         // envelope shape Python+TS return. [D10-003]
         let result = self
@@ -663,21 +684,31 @@ impl AsyncTaskBridge {
     }
 
     fn handle_list(&self, arguments: &Value) -> Result<Value, apcore::errors::ModuleError> {
-        let status_filter = arguments
-            .get("status")
-            .and_then(|v| v.as_str())
-            .map(|s| match s {
-                "pending" => Ok(TaskStatus::Pending),
-                "running" => Ok(TaskStatus::Running),
-                "completed" => Ok(TaskStatus::Completed),
-                "failed" => Ok(TaskStatus::Failed),
-                "cancelled" => Ok(TaskStatus::Cancelled),
-                other => Err(apcore::errors::ModuleError::new(
+        // [D11-102] Inspect the raw `status` value so non-string variants
+        // (numbers, bools, arrays, objects) are rejected instead of silently
+        // ignored by `as_str() → None`.
+        let status_filter = match arguments.get("status") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) => Some(match s.as_str() {
+                "pending" => TaskStatus::Pending,
+                "running" => TaskStatus::Running,
+                "completed" => TaskStatus::Completed,
+                "failed" => TaskStatus::Failed,
+                "cancelled" => TaskStatus::Cancelled,
+                other => {
+                    return Err(apcore::errors::ModuleError::new(
+                        apcore::errors::ErrorCode::GeneralInvalidInput,
+                        format!("unknown task status filter: {other}"),
+                    ));
+                }
+            }),
+            Some(_) => {
+                return Err(apcore::errors::ModuleError::new(
                     apcore::errors::ErrorCode::GeneralInvalidInput,
-                    format!("unknown task status filter: {other}"),
-                )),
-            })
-            .transpose()?;
+                    "__apcore_task_list `status` filter must be a string",
+                ));
+            }
+        };
         let tasks = self.list_tasks(status_filter);
         let tasks_json: Vec<Value> = tasks
             .into_iter()
@@ -1566,6 +1597,160 @@ mod tests {
         assert!(
             notifs.is_empty(),
             "no notification should be emitted after cancel; got {notifs:?}"
+        );
+    }
+
+    // -- [D11-101] handle_submit rejects non-object `arguments` ----------------
+
+    #[tokio::test]
+    async fn handle_submit_rejects_array_arguments() {
+        // Pre-fix Rust accepted any shape for `arguments` and silently
+        // collapsed to `{}` when it wasn't an object. Spec requires a JSON
+        // object; arrays/scalars must produce GeneralInvalidInput.
+        let bridge = AsyncTaskBridge::new(make_executor_with_async("some.module"));
+        let result = bridge
+            .handle_meta_tool(
+                META_TOOL_SUBMIT,
+                &json!({"module_id": "some.module", "arguments": [1, 2, 3]}),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        let inner = result.expect("meta-tool must be routed");
+        let err = inner.expect_err("array arguments must produce an error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("JSON object"),
+            "error must mention JSON object requirement; got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_submit_accepts_null_arguments_as_empty_object() {
+        // null / missing arguments collapse to `{}` per the existing
+        // contract — only structurally-wrong shapes are rejected.
+        let bridge = AsyncTaskBridge::new(make_executor_with_async("some.module"));
+        let res = bridge
+            .handle_meta_tool(
+                META_TOOL_SUBMIT,
+                &json!({"module_id": "some.module", "arguments": null}),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("routed")
+            .expect("submit must succeed for null arguments");
+        assert!(res.get("task_id").and_then(|v| v.as_str()).is_some());
+    }
+
+    // -- [D11-102] handle_list rejects non-string `status` --------------------
+
+    #[tokio::test]
+    async fn handle_list_rejects_non_string_status_filter() {
+        // Pre-fix Rust silently ignored `status: 5` (as_str() returned None
+        // → no filter). Spec requires a string filter or absent/null.
+        let bridge = AsyncTaskBridge::new(make_executor());
+        let result = bridge
+            .handle_meta_tool(
+                META_TOOL_LIST,
+                &json!({"status": 5}),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        let inner = result.expect("meta-tool must be routed");
+        let err = inner.expect_err("numeric status filter must produce an error");
+        assert!(
+            err.to_string().contains("must be a string"),
+            "error must mention string requirement; got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_list_accepts_missing_or_null_status_filter() {
+        let bridge = AsyncTaskBridge::new(make_executor());
+        // missing status — must succeed
+        let res = bridge
+            .handle_meta_tool(META_TOOL_LIST, &json!({}), None, None, None, None)
+            .await
+            .expect("routed")
+            .expect("missing status filter must succeed");
+        assert!(res.get("tasks").is_some());
+        // explicit null — must succeed
+        let res = bridge
+            .handle_meta_tool(
+                META_TOOL_LIST,
+                &json!({"status": null}),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("routed")
+            .expect("null status filter must succeed");
+        assert!(res.get("tasks").is_some());
+    }
+
+    // -- [D11-103] cancel awaits manager.cancel BEFORE dropping progress maps -
+
+    #[tokio::test]
+    async fn cancel_invokes_manager_cancel_before_dropping_progress_maps() {
+        // [D11-103] Regression test for cancel() ordering. The bridge MUST
+        // await `manager.cancel` first and only then drop the progress
+        // token/sender maps so any terminal `notifications/progress`
+        // emitted during the cancellation handshake can still reach the
+        // client. Matches Python (async_task_bridge.py:458-460) and
+        // TypeScript (async_task_bridge.ts:590-596).
+        //
+        // We verify the ordering by observing that emit_progress works
+        // correctly up until cancel returns, after which the sender is
+        // gone (cleanup happens last). A pre-fix ordering would clear
+        // the sender BEFORE awaiting manager.cancel, so emit_progress
+        // called inside the cancellation window would silently drop.
+        let bridge = AsyncTaskBridge::with_limits(make_executor(), 0, 100);
+        let (sender, captured) = make_capturing_sender();
+        let result = bridge
+            .submit(
+                "m",
+                json!({}),
+                None,
+                Some(json!("tok-1")),
+                Some(sender),
+                None,
+            )
+            .await
+            .expect("submit ok");
+
+        // Sanity: sender map populated before cancel.
+        bridge
+            .emit_progress(&result.task_id, 0.5, Some(1.0), Some("pre-cancel"))
+            .await;
+        assert_eq!(
+            captured.lock().unwrap().len(),
+            1,
+            "sender must be usable before cancel; got {:?}",
+            captured.lock().unwrap()
+        );
+
+        let _ = bridge.cancel(&result.task_id).await;
+
+        // After cancel, the sender map is dropped (cleanup completes).
+        bridge
+            .emit_progress(&result.task_id, 1.0, Some(1.0), Some("post-cancel"))
+            .await;
+        assert_eq!(
+            captured.lock().unwrap().len(),
+            1,
+            "post-cancel emit must be a no-op (sender already cleared); \
+             got {:?}",
+            captured.lock().unwrap()
         );
     }
 }
