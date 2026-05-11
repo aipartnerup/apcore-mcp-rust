@@ -177,10 +177,15 @@ impl JWTAuthenticator {
             other => other.to_string(),
         };
 
-        // Extract identity_type — default "user"
+        // Extract identity_type — default "user".
+        // [D11-107] Treat an empty string the same as a missing claim so
+        // Rust falls back to "user". Matches Python's `payload.get(...) or
+        // "user"` semantics (where "" is falsy) and TypeScript's
+        // truthy-check fallback.
         let identity_type = payload
             .get(&mapping.type_claim)
             .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
             .unwrap_or("user")
             .to_string();
 
@@ -457,6 +462,29 @@ mod tests {
         let headers = headers_with_token(&token);
         let identity = auth.authenticate(&headers).await.unwrap();
         assert_eq!(identity.identity_type(), "user");
+    }
+
+    #[tokio::test]
+    async fn empty_type_claim_falls_back_to_user() {
+        // [D11-107] An empty `type` claim must be treated as missing so
+        // Rust falls back to the default "user", matching Python's
+        // `payload.get(...) or "user"` (where "" is falsy) and the
+        // truthy-check fallback used in TypeScript.
+        let auth = make_authenticator();
+        let token = make_token(&serde_json::json!({
+            "sub": "user-1",
+            "type": "",
+        }));
+        let headers = headers_with_token(&token);
+        let identity = auth
+            .authenticate(&headers)
+            .await
+            .expect("auth should succeed with empty type claim");
+        assert_eq!(
+            identity.identity_type(),
+            "user",
+            "empty `type` claim must fall back to 'user'"
+        );
     }
 
     #[tokio::test]
