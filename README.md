@@ -245,6 +245,7 @@ apcore-mcp --extensions-dir PATH [OPTIONS]
 | `--jwt-require-auth` | on | Require valid token; use `--no-jwt-require-auth` for permissive mode |
 | `--exempt-paths` | — | Comma-separated paths exempt from auth (e.g. `/health,/metrics`) |
 | `--approval` | `off` | Approval handler: `elicit`, `auto-approve`, `always-deny`, or `off` |
+| `--output-format` | `json` | Built-in output format: `json`, `csv`, or `jsonl` |
 
 JWT key resolution priority: `--jwt-key-file` > `--jwt-secret` > `APCORE_JWT_SECRET` environment variable.
 
@@ -426,22 +427,25 @@ apcore-mcp --extensions-dir ./extensions --approval elicit
 
 ### Output Formatting
 
-By default, tool execution results are serialized as JSON. You can customize this by passing an `output_formatter` closure that converts a `serde_json::Value` into a string.
+By default, tool execution results are serialized as JSON. You can customize this by passing an `output_format` name or a custom `output_formatter` closure.
+
+**Built-in formats** (requires `apcore-toolkit` 0.7.0+):
 
 ```rust
-use apcore_mcp::APCoreMCP;
+// Via CLI
+// apcore-mcp --extensions-dir ./extensions --output-format csv
 
-let formatter = Box::new(|val: &serde_json::Value| -> Result<String, Box<dyn std::error::Error>> {
-    Ok(serde_json::to_string_pretty(val)?)
-});
-
+// Via API
 let mcp = APCoreMCP::builder()
-    .backend(executor)  // Arc<Executor> — see Quick Start for setup
-    .output_formatter(formatter)
+    .backend(executor)
+    .output_format(OutputFormat::Csv)
     .build()?;
 ```
 
-The `output_formatter` is also available on `ExecutionRouter` directly.
+Supports `json`, `csv`, and `jsonl`. Non-tabular data gracefully falls back to JSON.
+
+**Custom formatter**:
+Pass a closure that converts a `serde_json::Value` into a string.
 
 ### Extension Helpers
 

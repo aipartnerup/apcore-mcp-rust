@@ -6,9 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
-## [0.15.0] - 2026-05-09
+## [0.15.0] - 2026-05-14
 
-Leverages **apcore 0.21.0 + apcore-toolkit 0.6.0**. Cross-SDK byte-
+Leverages **apcore 0.21.0 + apcore-toolkit 0.7.0**. Cross-SDK byte-
 equivalent with `apcore-mcp-python` and `apcore-mcp-typescript` 0.15.0.
 
 ### Changed (BREAKING)
@@ -21,11 +21,12 @@ equivalent with `apcore-mcp-python` and `apcore-mcp-typescript` 0.15.0.
   `"BINDING_POLICY_VIOLATION"` is retained in
   `apcore_mcp::constants::ErrorCode` for backward-compat with legacy
   custom emitters).
-- **`apcore-toolkit` minimum version bumped to `0.6`** (was `0.5`).
+- **`apcore-toolkit` minimum version bumped to `0.7`** (was `0.5`).
 - **`AsyncTaskBridge::{submit, cancel, cancel_session_tasks, handle_meta_tool, handle_submit, handle_cancel, shutdown}` are now `async fn`** — propagates the upstream apcore 0.20+ async signatures. Sync transport-layer cancel handlers (the `Fn(&str)` closures installed via `transport_manager.set_cancel_handler` and `server_handler.with_cancel_handler`) now `tokio::spawn` the cancel call as fire-and-forget. The `progress_tokens` mutex guard is held in a tighter scope so the cancel future remains `Send` across the `.await` boundary.
 
 ### Added
 
+- **Built-in output format support**: Added `--output-format` (`json`, `csv`, `jsonl`) to CLI and `output_format()` to `APCoreMCPBuilder`. Leverages `apcore-toolkit` 0.7 for standard tabular formatting.
 - **`__apcore_module_preview` meta-tool** (apcore 0.21 PROTOCOL_SPEC §5.6 / §12.8) — fifth reserved meta-tool alongside the four `__apcore_task_*` ones. New `META_TOOL_PREVIEW` constant. The `handle_preview` async method drives `executor.validate(module_id, inputs, context)` and returns a `{valid, requires_approval, predicted_changes, checks}` JSON envelope WITHOUT executing the module. `arguments: null` and missing `arguments` are both preserved as `Value::Null` (the calling business decides whether null is acceptable); structurally-wrong shapes (arrays, scalars) error with `__apcore_module_preview requires 'arguments' to be a JSON object or null`. `MCPServerFactory::append_meta_tools` and `build_server_components` test counts updated to 5.
 - **`MCPServerFactory::with_rich_description(bool)` constructor** + `rich_description()` accessor — when set, `build_tools` renders `Tool.description` as canonical apcore-toolkit Markdown (`format_module(ModuleStyle::Markdown)`) instead of `registry.describe()`. Display-overlay `mcp.description` overrides still win first. LLMs select tools primarily from this string; Markdown packs more decision signal per token.
 - **`OpenAIConverter::convert_descriptor_with_options` / `convert_registry_with_options` / `convert_registry_apcore_with_options`** — accept a `ConvertOptions` struct (`embed_annotations`, `strict`, `rich_description`) so cross-cutting flags don't ratchet the positional signature of every public method. The original 5-positional-arg variants are retained as thin wrappers, no test breakage. The JSON path delegates to a new public `json_entry_to_scanned_module(module_id, entry)` adapter so duck-typed JSON registries can drive the same Markdown rendering path; the `&Registry` path uses `markdown::render_module_markdown(&descriptor, true)` directly to leverage the strictly-richer `ModuleDescriptor` (full `documentation`, `examples`, `display` overlay).

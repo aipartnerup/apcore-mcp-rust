@@ -201,6 +201,32 @@ pub(crate) fn deep_merge(base: &Value, overlay: &Value, depth: usize) -> Value {
 pub type OutputFormatter =
     Box<dyn Fn(&Value) -> Result<String, Box<dyn std::error::Error>> + Send + Sync>;
 
+/// Built-in output formats supported by the router.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputFormat {
+    /// Standard JSON serialization (default).
+    #[default]
+    Json,
+    /// RFC 4180 CSV via apcore-toolkit.
+    Csv,
+    /// JSON Lines via apcore-toolkit.
+    Jsonl,
+}
+
+impl std::str::FromStr for OutputFormat {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "json" => Ok(OutputFormat::Json),
+            "csv" => Ok(OutputFormat::Csv),
+            "jsonl" => Ok(OutputFormat::Jsonl),
+            _ => Err(format!("Unknown output format: {s}")),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Task 4: Context construction types
 // ---------------------------------------------------------------------------
@@ -279,6 +305,7 @@ pub struct ExecutionRouter {
     /// trace data in the returned content.
     trace: bool,
     output_formatter: Option<OutputFormatter>,
+    output_format: OutputFormat,
     /// Per-tool input schemas for `redact_sensitive` logging.
     /// Keys are tool names, values are their JSON Schema definitions.
     tool_schemas: HashMap<String, Value>,
@@ -357,6 +384,7 @@ impl ExecutionRouter {
             redact_output: true,
             trace: false,
             output_formatter: None,
+            output_format: OutputFormat::Json,
             tool_schemas: HashMap::new(),
             output_schemas: HashMap::new(),
             async_bridge: None,
@@ -378,6 +406,7 @@ impl ExecutionRouter {
             redact_output: true,
             trace: false,
             output_formatter,
+            output_format: OutputFormat::Json,
             tool_schemas: HashMap::new(),
             output_schemas: HashMap::new(),
             async_bridge: None,
@@ -402,11 +431,52 @@ impl ExecutionRouter {
             redact_output: true,
             trace: false,
             output_formatter,
+            output_format: OutputFormat::Json,
             tool_schemas: HashMap::new(),
             output_schemas: HashMap::new(),
             async_bridge: None,
             cancel_tokens: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Set the output format to use for all tool responses.
+    ///
+    /// When set to `Csv` or `Jsonl`, automatically uses the corresponding
+    /// formatter from `apcore-toolkit`. Takes precedence over any custom
+    /// `output_formatter`.
+    pub fn with_output_format(mut self, format: OutputFormat) -> Self {
+        self.output_format = format;
+        if format != OutputFormat::Json {
+            self.output_formatter = Some(Self::resolve_builtin_formatter(format));
+        }
+        self
+    }
+
+    /// Internal: Resolve a built-in format name to an [`OutputFormatter`].
+    fn resolve_builtin_formatter(format: OutputFormat) -> OutputFormatter {
+        Box::new(move |value| {
+            // Tabular formatters expect a slice of Maps.
+            // Map the Value to a Vec of Maps.
+            let rows: Vec<serde_json::Map<String, Value>> = match value {
+                Value::Array(arr) => arr.iter().filter_map(|v| v.as_object().cloned()).collect(),
+                Value::Object(obj) => vec![obj.clone()],
+                _ => Vec::new(),
+            };
+
+            if rows.is_empty() {
+                tracing::warn!(
+                    "output_format={:?} requested but result is not tabular; falling back to JSON",
+                    format
+                );
+                return Ok(serde_json::to_string(value)?);
+            }
+
+            match format {
+                OutputFormat::Csv => Ok(apcore_toolkit::format_csv(&rows, false)),
+                OutputFormat::Jsonl => Ok(apcore_toolkit::format_jsonl(&rows)),
+                OutputFormat::Json => Ok(serde_json::to_string(value)?),
+            }
+        })
     }
 
     /// Set the tool schemas used for `redact_sensitive` logging.
@@ -588,11 +658,13 @@ impl ExecutionRouter {
     /// Format an execution result into text for LLM consumption.
     ///
     /// Uses the configured `output_formatter` if set, otherwise falls back
-    /// to `serde_json::to_string`. The custom formatter is only applied to
-    /// `Value::Object` results.
+    /// to `serde_json::to_string`. Built-in formatters (CSV, JSONL) are applied
+    /// to both objects and arrays; custom formatters are applied to objects only.
     fn format_result(&self, result: &Value) -> String {
         if let Some(ref formatter) = self.output_formatter {
-            if result.is_object() {
+            let apply = result.is_object()
+                || (result.is_array() && self.output_format != OutputFormat::Json);
+            if apply {
                 match formatter(result) {
                     Ok(text) => return text,
                     Err(e) => {
@@ -1881,6 +1953,7 @@ mod tests {
             redact_output: false,
             trace: false,
             output_formatter: Some(formatter),
+            output_format: OutputFormat::Json,
             tool_schemas: HashMap::new(),
             output_schemas: HashMap::new(),
             async_bridge: None,
@@ -1899,6 +1972,7 @@ mod tests {
             redact_output: false,
             trace: false,
             output_formatter: Some(formatter),
+            output_format: OutputFormat::Json,
             tool_schemas: HashMap::new(),
             output_schemas: HashMap::new(),
             async_bridge: None,
@@ -1919,6 +1993,7 @@ mod tests {
             redact_output: false,
             trace: false,
             output_formatter: Some(formatter),
+            output_format: OutputFormat::Json,
             tool_schemas: HashMap::new(),
             output_schemas: HashMap::new(),
             async_bridge: None,

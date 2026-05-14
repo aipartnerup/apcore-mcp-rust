@@ -203,6 +203,10 @@ pub struct CliArgs {
     #[arg(long, value_enum, help = "Pipeline execution strategy")]
     pub strategy: Option<StrategyPreset>,
 
+    /// Built-in output format.
+    #[arg(long, value_enum, default_value_t = crate::server::router::OutputFormat::Json)]
+    pub output_format: crate::server::router::OutputFormat,
+
     /// Enable the built-in observability stack (auto-wires
     /// `MetricsMiddleware` and `UsageMiddleware`, and exposes `/metrics`
     /// (Prometheus) and `/usage` (JSON) endpoints on HTTP transports).
@@ -424,6 +428,8 @@ pub async fn run() -> Result<(), CliError> {
     if let Some(ref strategy) = args.strategy {
         builder = builder.strategy(strategy.as_str());
     }
+
+    builder = builder.output_format(args.output_format);
 
     if args.observability {
         builder = builder.observability(true);

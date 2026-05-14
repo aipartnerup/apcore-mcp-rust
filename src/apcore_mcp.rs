@@ -179,6 +179,9 @@ pub struct APCoreMCPConfig {
     pub explorer_project_url: Option<String>,
     /// Allow tool execution from the explorer UI.
     pub allow_execute: bool,
+    /// Optional built-in output format name ("json", "csv", "jsonl").
+    /// When set, automatically uses the corresponding formatter from `apcore-toolkit`.
+    pub output_format: crate::server::router::OutputFormat,
     /// Pipeline execution strategy preset (e.g. "standard", "internal", "testing").
     pub strategy: Option<String>,
     /// Enable pipeline trace mode. When true, tool responses include
@@ -218,6 +221,7 @@ impl Default for APCoreMCPConfig {
                 "https://github.com/aiperceivable/apcore-mcp-rust".to_string(),
             ),
             allow_execute: false,
+            output_format: crate::server::router::OutputFormat::Json,
             strategy: None,
             trace: false,
             observability: false,
@@ -487,6 +491,7 @@ impl APCoreMCP {
         let router = Arc::new(
             ExecutionRouter::new(Box::new(adapter), self.config.validate_inputs, None)
                 .with_redact_output(self.config.redact_output)
+                .with_output_format(self.config.output_format)
                 .with_trace(self.config.trace)
                 .with_output_schemas(output_schema_map)
                 .with_async_bridge(Arc::clone(&bridge)),
@@ -880,7 +885,11 @@ impl APCoreMCP {
     ///
     /// Returns a JSON object `{ "module_id": { "description": "...", "input_schema": {...}, "annotations": {...}, "tags": [...] }, ... }`.
     fn build_registry_json(&self) -> Value {
-        let module_ids = self.reg().list(None, None);
+        let mut module_ids = self.reg().list(None, None);
+        // Explicit sort required after apcore-toolkit 0.7.0 enabled
+        // serde_json/preserve_order: Map now preserves insertion order
+        // instead of alphabetical (BTreeMap) ordering.
+        module_ids.sort();
         let mut map = serde_json::Map::new();
 
         for module_id in module_ids {
@@ -1065,6 +1074,15 @@ impl APCoreMCPBuilder {
     /// Set whether to redact sensitive fields from tool outputs.
     pub fn redact_output(mut self, redact: bool) -> Self {
         self.config.redact_output = redact;
+        self
+    }
+
+    /// Set the built-in output format.
+    ///
+    /// Supports "json", "csv", and "jsonl". Automatically integrates
+    /// with `apcore-toolkit`.
+    pub fn output_format(mut self, format: crate::server::router::OutputFormat) -> Self {
+        self.config.output_format = format;
         self
     }
 
@@ -1462,6 +1480,8 @@ pub struct ServeConfig {
     pub exempt_paths: Option<Vec<String>>,
     /// Whether to redact sensitive fields from output.
     pub redact_output: Option<bool>,
+    /// Built-in output format.
+    pub output_format: Option<crate::server::router::OutputFormat>,
     /// Observability configuration.
     pub observability: Option<serde_json::Value>,
     /// Enable async task bridge.
@@ -1500,6 +1520,7 @@ impl Default for ServeConfig {
             require_auth: None,
             exempt_paths: None,
             redact_output: None,
+            output_format: None,
             observability: None,
             async_tasks: None,
             async_max_concurrent: None,
@@ -1541,6 +1562,8 @@ pub struct AsyncServeConfig {
     pub exempt_paths: Option<Vec<String>>,
     /// Whether to redact sensitive fields from output.
     pub redact_output: Option<bool>,
+    /// Built-in output format.
+    pub output_format: Option<crate::server::router::OutputFormat>,
     /// Observability configuration.
     pub observability: Option<serde_json::Value>,
     /// Enable async task bridge.
@@ -1575,6 +1598,7 @@ impl Default for AsyncServeConfig {
             require_auth: None,
             exempt_paths: None,
             redact_output: None,
+            output_format: None,
             observability: None,
             async_tasks: None,
             async_max_concurrent: None,
@@ -1678,6 +1702,10 @@ pub fn serve(backend: impl Into<BackendSource>, config: ServeConfig) -> Result<(
     if let Some(redact) = config.redact_output {
         builder = builder.redact_output(redact);
     }
+    // [D9-003] output_format: caller > bus. Default is Json (handled by builder).
+    if let Some(fmt) = config.output_format.or(bus.output_format) {
+        builder = builder.output_format(fmt);
+    }
     // observability — extract bool from `true`/`false` or `{ "enabled": bool }`
     // shapes and forward to APCoreMCPBuilder::observability(bool). Matches
     // apcore-mcp-python serve(observability: bool) parity. [D1-001]
@@ -1752,6 +1780,10 @@ pub async fn async_serve(
     }
     if let Some(redact) = config.redact_output {
         builder = builder.redact_output(redact);
+    }
+    // [D9-003] output_format: caller > bus.
+    if let Some(fmt) = config.output_format.or(bus.output_format) {
+        builder = builder.output_format(fmt);
     }
     // observability — extract bool and forward; matches Python parity. [D1-002]
     if let Some(obs) = config.observability.as_ref() {

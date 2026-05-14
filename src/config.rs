@@ -80,6 +80,7 @@ pub struct McpScalarConfig {
     pub explorer: Option<bool>,
     pub explorer_prefix: Option<String>,
     pub require_auth: Option<bool>,
+    pub output_format: Option<crate::server::router::OutputFormat>,
 }
 
 /// Read the 9 scalar `mcp.*` keys from the Config Bus.
@@ -131,6 +132,8 @@ pub fn get_scalar_config() -> McpScalarConfig {
                 _ => None,
             })
         }),
+        output_format: read(&config, "output_format")
+            .and_then(|v| v.as_str().and_then(|s| s.parse().ok())),
     }
 }
 
@@ -146,6 +149,7 @@ pub(crate) fn mcp_defaults() -> serde_json::Value {
         "explorer": false,
         "explorer_prefix": "/explorer",
         "require_auth": true,
+        "output_format": "json",
         // Declarative middleware list. Each entry is { type: string, ...kwargs }.
         // See `middleware_builder::build_middleware_from_config` for supported types.
         "middleware": [],
